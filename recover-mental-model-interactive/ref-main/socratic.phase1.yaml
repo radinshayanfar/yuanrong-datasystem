@@ -1,0 +1,7 @@
+protocol: recover-mental-model-interactive
+instance: ref-main
+state: recover
+iteration: 1
+gates: {}
+head_sha: 3f18c3d609f3e3859009a41b6ec29591ae8435a9
+history: []
