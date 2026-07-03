@@ -4,7 +4,26 @@ state: answering
 head_sha: 3f18c3d609f3e3859009a41b6ec29591ae8435a9
 gates:
   state: open
-  history: []
+  history:
+  - actor: radinshayanfar
+    answers:
+    - Q1.2.motivation
+    - Q1.4
+    - Q1.5
+    - Q1.6
+    - Q2.5
+    - Q4.4-target
+    - Q3.9.EmbeddedMaster.Rationale
+    - Q3.9.ZmqTransport.Rationale
+    - Q3.9.PughMatrix
+    - Q3.8.Cedar
+    - Q4.6.target
+    - Q5.5-limits
+    - Q5.1.TrackedDebt
+    - Q1.4.shared
+    - Q3.12-glossary
+    - Q4.6.target.shared
+    - Q5.3-target
   questions:
   - id: Q1.2.motivation
     text: "Which user segment is the primary design target today \u2014 is LLM KVCache\
