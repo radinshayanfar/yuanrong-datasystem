@@ -1,0 +1,82 @@
+{
+  "method": "socratic:phase1",
+  "run_id": "28668541430",
+  "files": [
+    {"path": "OPEN_QUESTIONS-yuanrong-datasystem.adoc", "bytes": 5879},
+    {"path": "QUESTION_TREE-yuanrong-datasystem.adoc", "bytes": 39060}
+  ],
+  "questions": [
+    {
+      "id": "Q1.2.motivation",
+      "text": "Which user segment is the primary design target today — is LLM KVCache the priority segment and Object/KV/stream/hetero secondary, or are they co-equal? (Product Owner)"
+    },
+    {
+      "id": "Q1.4",
+      "text": "Why was this bounded context built (business motivation) — is DataSystem a standalone product, a component extracted from the wider openYuanrong serverless engine, or a response to a specific customer/inference-cost problem? (Product Owner)"
+    },
+    {
+      "id": "Q1.5",
+      "text": "What are the success metrics / SLOs for this system — what numbers define success (e.g. p99 Get latency, throughput per GB-s, availability %)? (Product Owner)"
+    },
+    {
+      "id": "Q1.6",
+      "text": "What is the relative priority of the user segments — among Object / KV / stream / hetero, which scenario ranks first for roadmap and performance-tuning decisions? (Product Owner)"
+    },
+    {
+      "id": "Q2.5",
+      "text": "What are the authoritative acceptance criteria per use case — which observed system-test behaviours are contractual (definition of done, required error handling) versus incidental? (Product Owner)"
+    },
+    {
+      "id": "Q4.4-target",
+      "text": "What developer/operator usability outcome is required — what is the usability goal beyond one-command deploy and examples? (Product Owner)"
+    },
+    {
+      "id": "Q3.9.EmbeddedMaster.Rationale",
+      "text": "Why embed the master in the worker process rather than running a standalone master tier? (Architect)"
+    },
+    {
+      "id": "Q3.9.ZmqTransport.Rationale",
+      "text": "Why ZeroMQ for the primary RPC path when gRPC is also a dependency — was this a latency, framing-control, or gRPC-overhead decision? (Architect)"
+    },
+    {
+      "id": "Q3.9.PughMatrix",
+      "text": "Which alternatives were actually evaluated (standalone vs embedded master; gRPC/brpc vs ZMQ; rendezvous vs consistent hashing; always-on vs optional RDMA), and how do they score against the quality goals? (Architect)"
+    },
+    {
+      "id": "Q3.10/Q4.9",
+      "text": "What are the quality requirements and the top-3 ISO-25010 quality attribute ranking for this product release/segment, and what are their target scenarios? (Architect)"
+    },
+    {
+      "id": "Q3.8.Cedar",
+      "text": "Is Cedar authorization active at runtime in the request path, or is it planned / tooling-only? (Architect)"
+    },
+    {
+      "id": "Q4.6.target",
+      "text": "What is the security posture and threat model — is skip_authenticate ever permitted in production, what is the isolation model (multi-tenant vs external attacker), are there compliance frameworks, and is audit logging mandated? (Architect)"
+    },
+    {
+      "id": "Q5.5-limits",
+      "text": "What are the quantified scaling limits (maximum nodes per cluster, objects/keys per worker, object size) that bound the scaling design? (Architect)"
+    },
+    {
+      "id": "Q5.1.TrackedDebt",
+      "text": "Where is technical debt formally tracked — Gitee/GitCode issues, an internal backlog, or another registry — so Phase 2 can cite open debt items? (Developer)"
+    },
+    {
+      "id": "Q1.4.shared",
+      "text": "What real-world problem and domain drove building a near-compute multi-level cache — which workloads and cost pressures define the domain? (Domain Expert)"
+    },
+    {
+      "id": "Q3.12-glossary",
+      "text": "Are there business-specific terms not defined in the code (SLA tiers, workload names, customer-facing concepts) that must enter the architecture glossary? (Domain Expert)"
+    },
+    {
+      "id": "Q4.6.target.shared",
+      "text": "From an operations standpoint: is audit logging required, at what granularity, and are there compliance obligations governing deployment? (Operations)"
+    },
+    {
+      "id": "Q5.3-target",
+      "text": "What availability target must the cluster meet, and what is the required behaviour/tolerance when ETCD is unavailable or clocks skew? (Operations)"
+    }
+  ]
+}
