@@ -138,43 +138,27 @@ def resolve_leg_ids(dir_, pid, instance, tree_path, fanout_node):
     return [b["id"] for b in (fanout_node.get("branches", []) if fanout_node else [])]
 
 
-def collect_fanout_evidence(dir_, pid, instance, tree_path, fanout_node, proto=None):
+def collect_fanout_evidence(dir_, pid, instance, tree_path, fanout_node):
     """Assemble the reduce input for a `merge` with from_fanout: one row per leg
     in the manifest, carrying its terminal state + persisted evidence (or None).
     Reads from the state branch, never job outputs — resilient to matrix clobber.
 
-    `tree_path` is the fanout's TREE path (e.g. ['review'] for the top fanout, or
-    ['review', '<fileleg>', 'findings'] for a nested findings fanout). When `proto`
-    is given, each leg is resolved by its FULL tree path (tree_path + [lid]) via
-    state_path — nested-aware. If the fanout's `each` is itself a sub-pipeline
-    (has `states`), the leg's real OUTPUT evidence lives one level deeper, at its
-    terminal sub-state (tree_path + [lid, <last each.states id>]) — the leg
-    cursor file at tree_path + [lid] is just the sequence cursor and carries no
-    evidence. A flat leg fanout (`each` has no `states`) or a static fanout
-    (`branches:`, no `each`) is unaffected. When `proto` is None (back-compat),
-    legs are resolved FLAT (branch=leg-id, no path prefix), matching the
-    historical single-phase file layout used before nested from_fanout support."""
+    Milestone scope: tree_path is the TOP fanout's single-element path
+    (['<id>']); leg files are resolved flat (branch=leg-id, no phase prefix),
+    matching the single-phase file layout. Nested from_fanout / multi-phase
+    phase-prefixed legs are milestone 2."""
     man = read_manifest(dir_, pid, instance, tree_path)
-    each = (fanout_node or {}).get("each", {})
-    out_sub = each["states"][-1]["id"] if isinstance(each, dict) and each.get("states") else None
     rows = []
     for leg in man.get("legs", []):
         lid = leg["id"]
-        if proto is not None:
-            leg_fp = state_path(proto, list(tree_path) + [lid])
-            sf = state_file(dir_, pid, instance, path=leg_fp)          # leg SEQUENCE CURSOR
-            evid_tree = list(tree_path) + [lid] + ([out_sub] if out_sub else [])
-            evid_fp = state_path(proto, evid_tree)
-            evid_path = output_artifact_path(dir_, pid, instance, path=evid_fp)
-        else:
-            sf = state_file(dir_, pid, instance, lid)          # single-phase leg file
-            evid_path = output_artifact_path(dir_, pid, instance, branch=lid, kind="evidence")
+        sf = state_file(dir_, pid, instance, lid)          # single-phase leg file
         state = ""
         if os.path.isfile(sf):
             try:
                 state = load_yaml(sf).get("state", "") or ""
             except Exception:
                 state = ""
+        evid_path = output_artifact_path(dir_, pid, instance, branch=lid, kind="evidence")
         evidence = None
         if os.path.isfile(evid_path):
             try:
@@ -249,28 +233,6 @@ def run_expander(dir_, pid, instance, proto_path, fanout_node):
     if tok:
         env["GH_TOKEN"] = tok                       # read-only; never the state/publish PAT
     env["EXPAND_PARAMS"] = json.dumps(fanout_node.get("expand", {}))
-    # Nested-fanout live wiring: surface the enclosing sub-pipeline's PREDECESSOR
-    # sub-state evidence path (e.g. `main-review` for a `findings` fanout) so an
-    # expander that derives items from a prior phase's evidence can read it. Best
-    # effort, nested-only, and only when the evidence actually exists — a top-level
-    # fanout (NODE_PATH of length 1) or a missing predecessor leaves it unset. This
-    # is a computed PATH, not a secret, so it does not weaken the token allowlist.
-    node_path_str = os.environ.get("NODE_PATH", "")
-    if node_path_str and "." in node_path_str:
-        try:
-            with open(proto_path) as _pf:
-                _proto = json.load(_pf)
-            tp = node_path_str.split(".")
-            seq_node = _paths.node_at_path(_proto, tp[:-1])
-            sub_ids = [s["id"] for s in (seq_node.get("states", []) if seq_node else [])]
-            if tp[-1] in sub_ids and sub_ids.index(tp[-1]) > 0:
-                prev_id = sub_ids[sub_ids.index(tp[-1]) - 1]
-                prev_ev = output_artifact_path(dir_, pid, instance,
-                                               path=state_path(_proto, tp[:-1] + [prev_id]))
-                if os.path.isfile(prev_ev):
-                    env["EXPAND_PRIOR_EVIDENCE_PATH"] = prev_ev
-        except Exception:
-            pass  # best effort; the expander fails loud if it genuinely needs this
     r = subprocess.run([path, dir_, instance], text=True, capture_output=True, env=env)
     if r.returncode != 0:
         raise ValueError(f"expander '{expand.get('hook')}' failed (exit {r.returncode}): {r.stderr.strip()}")
@@ -666,17 +628,9 @@ def open_gate(dir_, pid, instance, proto_path, gate_id, sha, pr, branch=None, qu
         "head_sha": sha, "gates": gates,
     })
     if questions:
-        # Use the protocol's CONFIGURED answer-command prefix (e.g. /mm-answer), not a
-        # hardcoded /answer — do_answer strips that same per-protocol prefix, so a gate
-        # whose protocol registers a non-/answer verb would otherwise instruct a command
-        # that routes to nothing and the gate would sit forever.
-        try:
-            ans = command_prefix(json.load(open(proto_path)), "answer", "/answer")
-        except (OSError, ValueError):
-            ans = "/answer"
         listed = "\n".join(f"{i+1}. `{q['id']}` — {q['text']}" for i, q in enumerate(questions))
-        summary = (f"Answer with `{ans} <id>: <value>` (one or more per comment), e.g. "
-                   f"`{ans} {questions[0]['id']}: …`.")
+        summary = ("Answer with `/answer <id>: <value>` (one or more per comment), e.g. "
+                   f"`/answer {questions[0]['id']}: …`.")
         set_check_run(cr_name, sha, "in_progress", "", "Awaiting answers", summary)
         post_pr_comment(pr, f"❓ **{gate_id}** needs input:\n\n{listed}\n\n{summary}")
     else:
@@ -783,17 +737,10 @@ def set_check_run(name, sha, status, conclusion, title, summary):
     if conclusion:
         args += ["-f", f"conclusion={conclusion}"]
     repo = os.environ.get("GITHUB_REPOSITORY", "")
-    # Check-runs must be created by the ACTIONS token (github-actions[bot]) — a
-    # classic PAT cannot create/supersede an Actions-app check-run. Prefer a
-    # dedicated CHECK_RUN_TOKEN (the workflow's GITHUB_TOKEN, which the job grants
-    # `checks: write`); fall back to PUBLISH_TOKEN for callers whose PUBLISH_TOKEN
-    # already IS the Actions token (advance/join jobs). This matters for a protocol
-    # that finalizes at a terminal `merge` in the plan job, where PUBLISH_TOKEN is
-    # the dispatch PAT (which can post the review but cannot complete the check-run).
-    check_token = os.environ.get("CHECK_RUN_TOKEN") or os.environ.get("PUBLISH_TOKEN", "")
+    publish_token = os.environ.get("PUBLISH_TOKEN", "")
     env = dict(os.environ)
-    if check_token:
-        env["GH_TOKEN"] = check_token
+    if publish_token:
+        env["GH_TOKEN"] = publish_token
     result = subprocess.run(
         ["gh", "api", "-X", "POST", f"repos/{repo}/check-runs"] + args,
         text=True, capture_output=True, env=env
@@ -801,7 +748,7 @@ def set_check_run(name, sha, status, conclusion, title, summary):
     if result.returncode != 0:
         sys.stderr.write(
             "[engine] check-run create failed (needs checks:write + Actions token; "
-            f"merge-gating needs branch protection): {result.stderr.strip()}\n"
+            "merge-gating needs branch protection)\n"
         )
 
 
@@ -1257,11 +1204,8 @@ def _validate_sequence(states, path_hint):
     Rule 4 — fanout branches[] XOR expand+each (dynamic fan-out)
         A fanout has exactly one of a static `branches[]` or a dynamic
         `expand`+`each` pair. `expand` must carry hook/as/id_from/max_legs
-        (max_legs an int in [1,256]); `expand.matrix_fields`, when present, must
-        be an array of non-empty strings (the subset of item keys inlined into
-        matrix.leg.inputs — unset means the full item, see project_matrix_item).
-        `each` is a flat leg (`workflow`) XOR a sub-pipeline (`states`),
-        validated recursively like a static branch.
+        (max_legs an int in [1,256]); `each` is a flat leg (`workflow`) XOR a
+        sub-pipeline (`states`), validated recursively like a static branch.
 
     Rule 5 — join.policy must parse
         A join's optional `policy` must be accepted by `join_policy_satisfied`
@@ -1345,11 +1289,6 @@ def _validate_sequence(states, path_hint):
                     raise ValueError(
                         f"fanout '{sid}' expand.max_legs must be an int in [1,256], got {ml!r}"
                     )
-                mf = exp.get("matrix_fields")
-                if mf is not None and (not isinstance(mf, list) or not all(isinstance(x, str) and x for x in mf)):
-                    raise ValueError(
-                        f"fanout '{sid}' expand.matrix_fields must be an array of non-empty strings"
-                    )
                 each = st.get("each") or {}
                 if bool(each.get("states")) == bool(each.get("workflow")):
                     raise ValueError(
@@ -1427,45 +1366,6 @@ def _render_leg_section(sf, max_iter):
     return st, "\n".join(out)
 
 
-def _evidence_status_note(d, pid, instance, ph_id, bid, cfg):
-    """Render a flagged note for a fan-out leg's status header from its evidence —
-    driven ENTIRELY by the fanout's `params.status_note` config so the generic engine
-    carries no protocol vocabulary. The per-leg checklist reports 'all checks passed'
-    from the FORM checks only, so a leg whose evidence carries a flag-worthy verdict /
-    severity reads as clear without this. cfg keys (all optional):
-      verdict_field + flag_verdicts[]   → flag when ev[verdict_field] ∈ flag_verdicts
-      severity_field + flag_severities[]→ count findings[].<severity_field> ∈ flag_severities
-      label (default "flagged"), emoji (default "⚠️").
-    Returns '' when cfg is absent (callers pass it only for opted-in fanouts), the
-    evidence is missing/malformed, or nothing matched.
-    """
-    if not isinstance(cfg, dict):
-        return ""
-    path = output_artifact_path(d, pid, instance, branch=bid, phase=ph_id, kind="evidence")
-    if not os.path.isfile(path):
-        return ""
-    try:
-        with open(path) as fh:
-            ev = json.load(fh)
-    except (OSError, ValueError):
-        return ""
-    if not isinstance(ev, dict):
-        return ""
-    vfield, flag_verdicts = cfg.get("verdict_field"), cfg.get("flag_verdicts") or []
-    sfield, flag_sev = cfg.get("severity_field"), cfg.get("flag_severities") or []
-    counts = {}
-    if sfield and flag_sev:
-        for f in (ev.get("findings") if isinstance(ev.get("findings"), list) else []):
-            if isinstance(f, dict) and f.get(sfield) in flag_sev:
-                counts[f[sfield]] = counts.get(f[sfield], 0) + 1
-    verdict_flagged = bool(vfield and ev.get(vfield) in flag_verdicts)
-    if not verdict_flagged and not counts:
-        return ""
-    parts = [f"{counts[s]} {s}" for s in flag_sev if counts.get(s)]
-    detail = f" ({', '.join(parts)})" if parts else ""
-    return f" — {cfg.get('emoji', '⚠️')} {cfg.get('label', 'flagged')}{detail}"
-
-
 def render_pipeline_status_body(dir_, pid, instance, proto):
     """
     render_pipeline_status_body <state_dir> <pid> <instance> <protocol.json>
@@ -1500,9 +1400,7 @@ def render_pipeline_status_body(dir_, pid, instance, proto):
                 max_iter = b.get("max_iterations", "?")
                 sf = state_file(dir_, pid, instance, bid, phase=ph_id)
                 st, lines = _render_leg_section(sf, max_iter)
-                vnote = _evidence_status_note(dir_, pid, instance, ph_id, bid,
-                                              (ph.get("params") or {}).get("status_note"))
-                sections += f"**{ph_id} · {bid}**{vnote}\n\n{lines}\n\n"
+                sections += f"**{ph_id} · {bid}**\n\n{lines}\n\n"
                 if st == "done":
                     pass
                 elif st == "failed":
@@ -1661,82 +1559,36 @@ def stage_item(dir_, pid, instance, file_path, as_, item):
         json.dump(item, f)
 
 
-def project_matrix_item(item, matrix_fields):
-    """Subset a dynamic leg's item to the keys that ride the GHA matrix.
-    matrix_fields None/unset -> the full item (backward-compatible). Absent keys
-    are skipped. The FULL item always stays durable on the state branch (stage_item);
-    this only trims what is inlined into matrix.leg.inputs."""
-    if not matrix_fields:
-        return item
-    return {k: item[k] for k in matrix_fields if k in item}
-
-
-# GHA strategy.matrix / $GITHUB_OUTPUT practical ceiling; keep well under 1 MB.
-_MATRIX_BYTES_CAP = 900_000
-
-
-def check_matrix_size(legs):
-    """Fail loud if the serialized matrix legs would exceed the GHA output/matrix
-    cap. A protocol author who forgot `matrix_fields` gets a clear error, never a
-    silent truncation (same discipline as max_legs over-cap)."""
-    n = len(json.dumps(legs))
-    if n > _MATRIX_BYTES_CAP:
-        raise ValueError(
-            f"matrix legs serialize to {n} bytes (> {_MATRIX_BYTES_CAP}); "
-            f"set the fanout's expand.matrix_fields to inline only small keys "
-            f"(large fields stay on the state branch; the agent re-fetches them)")
-
-
-def run_merge_hook(dir_, pid, instance, proto_path, merge_state, consuming_path=None):
+def run_merge_hook(dir_, pid, instance, proto_path, merge_state):
     """Resolve+materialize a merge state's inputs and run its trusted reduce hook.
-    Returns {conclusion, summary}; neutral fallback on any resolution/exec error.
-
-    `consuming_path` is the merge node's TREE path. For a NESTED merge (a per-file
-    `reduce` inside a sub-pipeline leg — path length > 1), a `from_fanout` resolves
-    RELATIVE to that path: the fanout is the merge's sibling in the same
-    (sub-)sequence, i.e. `consuming_path[:-1] + [fanout_id]`; plain `from` inputs
-    resolve path-aware from the same scope. For the TOP merge (consuming_path None
-    or length 1) resolution is byte-identical to the pre-nesting behavior: the
-    fanout is the top-level `[fanout_id]` and plain inputs use the legacy 3-case
-    resolver (consuming_path suppressed)."""
+    Returns {conclusion, summary}; neutral fallback on any resolution/exec error."""
     pdir = os.path.dirname(os.path.abspath(proto_path))
     with open(proto_path) as f:
         proto = json.load(f)
     fo = _fanout_state(proto)
     phase = fo["id"] if (fo and is_multiphase(proto)) else None
     merge_inputs = merge_state.get("inputs", [])
-    # A nested merge (its tree path has more than one element) resolves inputs
-    # relative to its own scope; a top merge (None or length 1) stays legacy.
-    nested = bool(consuming_path) and len(consuming_path) > 1
-    cp_for_inputs = consuming_path if nested else None
     # from_fanout inputs have no `from` key — resolve_inputs only understands
     # `from`, so keep them out of that call and handle them in the loop below.
     plain_inputs = [inp for inp in merge_inputs if "from" in inp]
     # Branch-id refs resolve against branch leg outputs (Plan 2 resolve_inputs).
     resolved = resolve_inputs(proto, dir_, pid, instance,
                               consuming_branch=None, consuming_phase=phase,
-                              inputs=plain_inputs, consuming_path=cp_for_inputs)
+                              inputs=plain_inputs)
     workdir = tempfile.mkdtemp(prefix="merge-")
     materialize_inputs(resolved, workdir)
     for inp in merge_inputs:
         if inp.get("from_fanout"):
             fo_id = inp["from_fanout"]
-            # Resolve the fanout RELATIVE TO the merge's node-path: it is the
-            # merge's sibling in the same (sub-)sequence → parent-of-merge + fanout
-            # id. Top merge → the top fanout ([fo_id]).
-            if nested:
-                fo_tree_path = list(consuming_path[:-1]) + [fo_id]
-            else:
-                fo_tree_path = [fo_id]
-            # A nested fanout is NOT a top-level state, so state_by_id() would miss
-            # it — address it by full tree path.
-            fo_node = _paths.node_at_path(proto, fo_tree_path)
-            if fo_node is None or not os.path.isfile(manifest_file(dir_, pid, instance, fo_tree_path)):
+            fo_node = state_by_id(proto, fo_id)
+            fo_tree_path = [fo_id]  # top fanout; nested merges pass full path (milestone 2)
+            if not os.path.isfile(manifest_file(dir_, pid, instance, fo_tree_path)):
                 raise ValueError(
-                    f"merge from_fanout='{fo_id}': no manifest at {'.'.join(fo_tree_path)} "
-                    f"(fanout not materialized or misnamed)"
+                    f"merge from_fanout='{inp['from_fanout']}': no manifest at "
+                    f"{'.'.join(fo_tree_path)} — the fanout has not materialized, or it is a "
+                    f"nested fanout (nested from_fanout is not supported yet)"
                 )
-            rows = collect_fanout_evidence(dir_, pid, instance, fo_tree_path, fo_node, proto=proto)
+            rows = collect_fanout_evidence(dir_, pid, instance, fo_tree_path, fo_node)
             inputs_dir = os.path.join(workdir, "inputs")
             os.makedirs(inputs_dir, exist_ok=True)
             with open(os.path.join(inputs_dir, f"{inp['as']}.json"), "w") as f:

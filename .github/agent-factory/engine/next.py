@@ -84,7 +84,6 @@ def _fanout_action(proto, path, branches):
             leg["inputs"] = b["inputs"]
         legs.append(leg)
     act["legs"] = legs
-    lib.check_matrix_size(legs)
     return act
 
 
@@ -113,23 +112,12 @@ def enter_node(proto, path, command, emit=True):
                            "sub_state": first, "iteration": 1, "gates": {}, "history": []})
         return enter_node(proto, path + [first], command, emit=emit)
     if kind == "fanout":
-        # Reset the join barrier on ENTERING this fanout so its own join can fire.
-        # NESTED fanouts (len > 1) use a path-keyed __join.yaml marker. A TOP-level
-        # fanout (len 1) uses the instance-wide _instance.yaml `joined` flag — which a
-        # PRIOR top-level fanout (e.g. `review` before `post-fix`) leaves latched True;
-        # without this reset join.py would no-op the second fanout's barrier and the
-        # pipeline would stall (the next phase, e.g. mrp, never dispatched). Idempotent
-        # for the first fanout (joined already absent/False). The change is staged with
-        # the seeded legs and CAS-pushed by the fanout-entry caller.
+        # Top fanout (len 1) keeps the legacy _instance.yaml `joined` mechanism the
+        # callers own. Only NESTED fanouts (len > 1) get a path-keyed __join.yaml
+        # marker (a top fanout marker would be a new file under the instance dir →
+        # breaks byte-identity). The file path routes through state_path.
         if len(path) > 1:
             lib.write_join(DIR, PID, INSTANCE, lib.state_path(proto, path), {"joined": False})
-        else:
-            inf = lib.instance_file(DIR, PID, INSTANCE)
-            if os.path.isfile(inf):
-                _inst = lib.load_yaml(inf)
-                if _inst.get("joined"):
-                    _inst["joined"] = False
-                    lib.dump_yaml(inf, _inst)
         if node.get("expand"):
             # --- DYNAMIC fanout: materialize legs from the expander manifest. ---
             each = node.get("each", {})
@@ -144,8 +132,7 @@ def enter_node(proto, path, command, emit=True):
                 seeded = _seed_child(proto, path + [leg["id"]], cfg)
                 lib.stage_item(DIR, PID, INSTANCE, lib.state_path(proto, path + [leg["id"]]),
                                node["expand"]["as"], leg["item"])
-                seeded["inputs"] = {node["expand"]["as"]:
-                                    lib.project_matrix_item(leg["item"], node["expand"].get("matrix_fields"))}
+                seeded["inputs"] = {node["expand"]["as"]: leg["item"]}
                 branches.append(seeded)
             # zero legs → branches == [] falls through the shared tail unchanged (vacuous fanout)
         else:
@@ -160,38 +147,16 @@ def enter_node(proto, path, command, emit=True):
     if kind == "agent":
         sf = lib.state_file(DIR, PID, INSTANCE, path=fpath)
         os.makedirs(os.path.dirname(sf), exist_ok=True)
-        node_state = life or path[-1]
-        # Preserve an in-flight iterate. An iterate re-dispatch is a `continue` onto
-        # the SAME agent phase that advance already advanced (iteration N + a history
-        # entry carrying the failed round's feedback). Re-seeding it to
-        # iteration:1/history:[] would reset the bounded iterate loop into an INFINITE
-        # one (the counter never reaches max_iterations) and drop the feedback the
-        # agent needs to converge. So only a FRESH entry (no state file, or a prior
-        # terminal, or a non-continue command) seeds; an in-flight continue preserves.
-        existing = lib.load_yaml(sf) if os.path.exists(sf) else None
-        preserve = bool(command == "continue" and existing
-                        and existing.get("state") == node_state)
-        if preserve:
-            st = existing
-        else:
-            st = {"protocol": PID, "instance": INSTANCE, "state": node_state,
-                  "iteration": 1, "gates": {}, "head_sha": HEAD_SHA, "history": []}
-            lib.dump_yaml(sf, st)
-        it = int(st.get("iteration", 1))
-        _hist = st.get("history") or []
-        fb = _hist[-1].get("feedback", "") if _hist else ""
+        lib.dump_yaml(sf, {"protocol": PID, "instance": INSTANCE, "state": life or path[-1],
+                           "iteration": 1, "gates": {}, "head_sha": HEAD_SHA, "history": []})
         if emit:
-            act = {"action": "run-agent", "iteration": it, "feedback": fb,
+            act = {"action": "run-agent", "iteration": 1, "feedback": "",
                    "reason": f"phase:{path[-1]}", "path": ".".join(path),
                    "workflow": paths.node_at_path(proto, path).get("workflow")}
             if lib.is_multiphase(proto):
                 act["phase"] = path[-1]
             print(json.dumps(act))
-        # `seeded` tells a `continue` caller whether new state was written (so it must
-        # cas_push it) or an in-flight iterate was preserved (nothing new → an empty
-        # cas_push would fail loudly).
-        return {"id": path[-1], "workflow": node.get("workflow"),
-                "iteration": it, "feedback": fb, "seeded": not preserve}
+        return {"id": path[-1], "workflow": node.get("workflow"), "iteration": 1, "feedback": ""}
     if kind == "gate":
         pr = lib.pr_from_instance(INSTANCE)
         lib.open_gate(DIR, PID, INSTANCE, PROTO, path[-1], HEAD_SHA, pr,
@@ -768,28 +733,17 @@ if COMMAND == "continue" and NODE_PATH:
         print(json.dumps(_fanout_action(proto_data, _p, branches)))
         sys.exit(0)
     if _kind == "agent":
-        # A `continue` onto an AGENT node. Two shapes:
-        #  - FRESH entry: a sub-pipeline sub-state (e.g. `report` after a nested join
-        #    bubbled the cursor forward) — enter_node seeds it; cas_push so the
-        #    dispatched agent finds it. iteration:1, feedback:"".
-        #  - ITERATE re-dispatch: advance already advanced the SAME agent phase
-        #    (iteration N + feedback history) and pushed it; enter_node PRESERVES it,
-        #    so there is nothing new to push (an empty cas_push fails loudly). Carry
-        #    the preserved iteration + last-failure feedback into the run-agent action.
+        # A `continue` onto an AGENT sub-state of a sub-pipeline leg (e.g. the
+        # `report` sub-state after a nested join bubbled the cursor forward).
+        # Seed its state file, cas_push so the dispatched agent finds it, then
+        # emit a path-qualified run-agent action. Same seed→cas_push→emit order.
         node = paths.node_at_path(proto_data, _p)
-        seq = enter_node(proto_data, _p, "continue", emit=False)
-        if seq.get("seeded", True):
-            lib.cas_push(DIR, f"{PID}/{INSTANCE}: continue agent {NODE_PATH}")
-        act = {"action": "run-agent",
-               "iteration": seq.get("iteration", 1), "feedback": seq.get("feedback", ""),
+        enter_node(proto_data, _p, "continue", emit=False)
+        lib.cas_push(DIR, f"{PID}/{INSTANCE}: continue agent {NODE_PATH}")
+        act = {"action": "run-agent", "iteration": 1, "feedback": "",
                "reason": f"continue:{NODE_PATH}", "path": NODE_PATH,
                "workflow": node.get("workflow")}
-        # Declared inputs come from the node AT THIS PATH — node_at_path is each-aware,
-        # so it finds a DYNAMIC fanout's `each.states` sub-pipeline agent's inputs (e.g.
-        # OCR main-review's `from: plan`). lib.state_inputs only scans top-level states +
-        # a STATIC fanout's branches[], so it silently returns [] for a dynamic each →
-        # the agent would receive empty inputs and not know which item it owns.
-        declared = node.get("inputs", [])
+        declared = lib.state_inputs(proto_data, _p[-1])
         if declared:
             # Path-aware: resolve each `from` OUTERMOST-search relative to this
             # node's tree path, so a nested agent's inputs reach an earlier
@@ -809,37 +763,10 @@ if COMMAND == "continue" and NODE_PATH:
                           "reason": f"gate-open:{NODE_PATH}"}))
         sys.exit(0)
     if _kind == "merge":
-        # A `continue` onto a MERGE state. Two shapes:
-        #  - NESTED merge (a per-file `reduce`, path length > 1): LEG-TERMINAL.
-        #  - TOP merge (path length 1, dispatched by the top join): finalize instance.
+        # A `continue` onto a MERGE state (dispatched by the top join via path-continue).
+        # Run the reduce hook, finalize the instance, update comment + label.
         node = paths.node_at_path(proto_data, _p)
-        res = lib.run_merge_hook(DIR, PID, INSTANCE, PROTO, node, consuming_path=_p)
-        if len(_p) > 1:
-            # NESTED merge (a per-file `reduce`): LEG-TERMINAL, mirroring
-            # advance.complete_sequence. (1) persist the merge result as THIS leg's
-            # output evidence so the enclosing fanout's from_fanout can collect the
-            # survivors; (2) mark the file-leg SEQUENCE CURSOR done; (3) fire the
-            # enclosing fanout's join exactly as join.py does (path-less for a
-            # top-level enclosing fanout, path-keyed if nested).
-            leg_path = _p[:-1]                       # the file-leg sub-pipeline cursor
-            ev = lib.output_artifact_path(DIR, PID, INSTANCE, path=lib.state_path(proto_data, _p))
-            os.makedirs(os.path.dirname(ev), exist_ok=True)
-            with open(ev, "w") as f:
-                json.dump(res, f)
-            cursor_sf = lib.state_file(DIR, PID, INSTANCE, path=lib.state_path(proto_data, leg_path))
-            cur = lib.load_yaml(cursor_sf) if os.path.isfile(cursor_sf) else {}
-            cur["state"] = "done"
-            lib.dump_yaml(cursor_sf, cur)
-            lib.cas_push(DIR, f"{INSTANCE}: nested merge {'.'.join(_p)} → leg done")
-            efp = paths.enclosing_fanout_path(proto_data, _p)
-            fields = {"protocol": PID, "instance": INSTANCE}
-            if efp and len(efp) > 1:
-                fields["path"] = ".".join(efp)
-            lib._gh_dispatch("protocol-join", fields)
-            print(json.dumps({"action": "noop", "iteration": 0, "feedback": "",
-                              "reason": f"nested-merge-done:{'.'.join(_p)}"}))
-            sys.exit(0)
-        # TOP merge (existing behavior, unchanged): finalize the instance.
+        res = lib.run_merge_hook(DIR, PID, INSTANCE, PROTO, node)
         inf = lib.instance_file(DIR, PID, INSTANCE)
         inst = lib.load_yaml(inf) if os.path.isfile(inf) else {}
         inst["phase"] = _p[-1]
