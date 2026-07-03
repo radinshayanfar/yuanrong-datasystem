@@ -1,0 +1,56 @@
+= ADR 003 — Maintain both external ETCD and a built-in Metastore as coordination backends
+:doctype: article
+
+// Synthesized by Socratic Code-Theory Recovery, Phase 2, from the Q3.9 branch.
+// Nygard format. Pugh matrix scored against the Q4 quality goals.
+
+== Status
+Accepted (as-built).
+
+== Context
+Cluster coordination (membership, leases, hash-ring topology) is served through a
+`KvStore` abstraction with two backends: an external ETCD cluster (a hard runtime
+dependency by default) and a built-in Metastore
+[src/datasystem/common/kvstore/kv_store.h:31, README_EN.md:74, src/datasystem/common/kvstore/metastore/metastore_server.h:39].
+
+A hard external-ETCD dependency is a known operational risk (single coordination point
+if under-provisioned) [README_EN.md:74]. Quality priority is correctness > availability
+> latency (team answer).
+
+== Decision
+Support both an external ETCD and a built-in Metastore behind the `KvStore`
+abstraction, and choose per deployment.
+
+Rationale (team answer): ETCD is the default for standard clusters; Metastore is the
+embedded/self-managed alternative for deployments that want to avoid an external ETCD.
+Metastore is intended to eventually *reduce* — not fully replace — the hard ETCD
+dependency.
+
+== Consequences
+* (+) Deployments with existing ETCD infrastructure use it directly; deployments that cannot run external ETCD use the embedded Metastore (operational flexibility, team answer).
+* (+) A migration path exists to lower the hard external-ETCD dependency over time (team answer).
+* (−) Two coordination backends must be built, tested, and kept behaviorally consistent behind one `KvStore` interface (maintainability cost) [src/datasystem/common/kvstore/kv_store.h:31].
+* (−) Until Metastore fully matures, standard clusters still carry the external-ETCD operational risk [README_EN.md:74].
+
+== Alternatives Considered (Pugh Matrix)
+Baseline (0) = the chosen design (both backends behind `KvStore`). Scale: -1 / 0 / +1.
+
+[cols="2,1,1,1", options="header"]
+|===
+| Quality goal (Q4) | Both (ETCD + Metastore, baseline) | ETCD only | Metastore only
+
+| Correctness (priority 1) | 0 | 0 | -1
+| Availability (priority 2) | 0 | 0 | 0
+| Latency/performance (priority 3) | 0 | 0 | 0
+| Operational flexibility | 0 | -1 | 0
+| Reduce external dependency | 0 | -1 | +1
+| Maintainability (one backend) | 0 | +1 | +1
+| Maturity / proven-ness | 0 | +1 | -1
+| *Weighted lean* | *baseline* | *simplest, hard ETCD dependency* | *self-contained but less proven*
+
+|===
+
+ETCD-only is the most proven and least code, but keeps a hard external dependency;
+Metastore-only removes that dependency but is less mature. Maintaining both preserves
+correctness/maturity today (ETCD default) while opening the migration path the team
+intends (team answer).

@@ -1,0 +1,54 @@
+= ADR 001 — Co-host the master role in the worker binary, elected via ETCD CAS
+:doctype: article
+
+// Synthesized by Socratic Code-Theory Recovery, Phase 2, from the Q3.9 branch.
+// Nygard format. Pugh matrix scored against the Q4 quality goals.
+
+== Status
+Accepted (as-built).
+
+== Context
+DataSystem needs a coordinating "master" role that owns object metadata, replica
+management, and cluster membership. The as-built design does not run a dedicated
+master tier: every worker binary can host the master services, and exactly one node is
+elected at init. Election is an ETCD compare-and-swap on `/datasystem/replica_group`;
+`WorkerOCServer::InitializeAllServices` branches to master services when
+`etcdCM_->IsCurrentNodeMaster()` is true
+[src/datasystem/worker/worker_oc_server.cpp:676, src/datasystem/master/replica_manager.cpp:535, src/datasystem/master/master_service_impl.h:51].
+
+The governing quality priority is correctness > availability > latency (team answer).
+
+== Decision
+Co-host the master role inside the worker binary and elect a single active master
+among workers via ETCD CAS, rather than operating a separate master tier.
+
+Rationale (team answer): ETCD CAS election avoids operating a separate master tier —
+it favors operational simplicity and elastic scaling over the tighter blast-radius
+isolation that a dedicated tier would provide.
+
+== Consequences
+* (+) One binary and one deployment artifact per node; no separate master fleet to size, deploy, or scale (operational simplicity, team answer).
+* (+) Elastic: any worker can assume the master role, so the cluster self-heals master loss without a standby tier.
+* (−) Weaker blast-radius isolation: master workload and data-plane workload share a process, so a master-side fault can affect the co-located data plane (team answer).
+* (−) Correctness depends on ETCD as the single election authority; a split or mis-provisioned ETCD is a coordination risk [README_EN.md:74].
+
+== Alternatives Considered (Pugh Matrix)
+Baseline (0) = the chosen design (master co-hosted, ETCD-CAS elected). Scale: -1 / 0 / +1.
+
+[cols="2,1,1,1", options="header"]
+|===
+| Quality goal (Q4) | Co-hosted + ETCD CAS (baseline) | Dedicated master tier | Static/config-fixed master
+
+| Correctness (priority 1) | 0 | +1 | -1
+| Availability (priority 2) | 0 | +1 | -1
+| Latency/performance (priority 3) | 0 | 0 | 0
+| Operational simplicity | 0 | -1 | +1
+| Maintainability | 0 | -1 | 0
+| Blast-radius isolation | 0 | +1 | 0
+| *Weighted lean* | *baseline* | *stronger isolation, higher ops cost* | *simplest, least available*
+
+|===
+
+The chosen design trades some blast-radius isolation for materially lower operational
+cost and elastic scaling, consistent with the stated preference for operational
+simplicity while keeping availability high through automatic re-election.

@@ -1,0 +1,124 @@
+generated: "2026-07-03"
+source: "CODEBASE.md"
+version: "1.0"
+analyzed_commit: "3f18c3d609f3e3859009a41b6ec29591ae8435a9"
+
+# Project root mappings (single-package, dual Bazel+CMake build)
+mappings:
+  core_source:
+    paths:
+      - "src/datasystem"
+    priority: 10
+    pattern: "**/*.{cpp,cc,h,hpp}"
+    description: "Core C++ runtime (client, worker, master, server, common)"
+  public_headers:
+    paths:
+      - "include/datasystem"
+    priority: 10
+    pattern: "**/*.h"
+    description: "Public C++ SDK headers / API surface"
+  contracts:
+    paths:
+      - "src/datasystem/protos"
+    priority: 10
+    pattern: "**/*.proto"
+    description: "Protobuf RPC contracts"
+  shared_infra:
+    paths:
+      - "src/datasystem/common"
+    priority: 10
+    pattern: "**/*.{cpp,h}"
+    description: "Shared infra: rdma, l2cache, log, metrics, rpc, kvstore, shared_memory, flags"
+  tests:
+    paths:
+      - "tests"
+      - "tests/ut"
+      - "tests/st"
+      - "tests/perf"
+      - "tests/python"
+    priority: 10
+    pattern: "**/*{_test.cpp,_test.py}"
+    description: "Unit (gtest), system (gtest, multi-process), perf, and python (pytest) tests"
+  python_sdk:
+    paths:
+      - "python/yr/datasystem"
+    priority: 10
+    pattern: "**/*.py"
+    description: "Python SDK surface"
+  bindings:
+    paths:
+      - "src/datasystem/pybind_api"
+      - "src/datasystem/java_api"
+      - "src/datasystem/c_api"
+      - "go"
+      - "java"
+    priority: 5
+    pattern: "**/*"
+    description: "Python (pybind11), Java (JNI), and Go (cgo/C-API) binding layers"
+  cli_ops:
+    paths:
+      - "cli"
+      - "scripts"
+    priority: 10
+    pattern: "**/*.py"
+    description: "Operational + deployment CLI and build/support scripts"
+  config:
+    paths:
+      - "cli/deploy/conf"
+      - "src/datasystem/common/flags"
+    priority: 5
+    pattern: "**/*.{json}"
+    description: "Runtime config: JSON files + gflags definitions (no .env convention)"
+  build:
+    paths:
+      - "cmake"
+      - "bazel"
+    priority: 10
+    pattern: "**/*.{cmake,bazel,bzl}"
+    description: "Dual build graph — Bazel (WORKSPACE/BUILD.bazel) and CMake"
+  deploy:
+    paths:
+      - "k8s"
+      - "k8s_deployment"
+    priority: 10
+    pattern: "**/*.{yaml,yml}"
+    description: "Kubernetes / Helm deployment manifests"
+  docs:
+    paths:
+      - "docs/source_zh_cn"
+    priority: 10
+    pattern: "**/*.{md,rst}"
+    description: "Checked-in documentation source (zh_cn)"
+  examples:
+    paths:
+      - "example"
+    priority: 10
+    pattern: "**/*"
+    description: "Multi-language usage examples (cpp/go/java/python)"
+  transfer_engine:
+    paths:
+      - "transfer_engine"
+    priority: 5
+    pattern: "**/*"
+    description: "Separate NPU HBM transfer subsystem"
+
+# Validation rules for path enforcement
+rules:
+  strictness: warn
+  exceptions:
+    - "third_party"            # vendored dependencies — do not enforce
+    - "transfer_engine/third_party"
+  notes:
+    - "New source files must be registered in BOTH BUILD.bazel and the nearest CMakeLists.txt."
+    - "This is not a monorepo (single package with multi-language bindings)."
+
+autoUpdate:
+  enabled: true
+  mode: "prompt"
+  threshold:
+    newDirectoryFiles: 3
+    newCategoryFiles: 10
+    categoryChangePercent: 20
+  backup:
+    enabled: true
+    keepCount: 5

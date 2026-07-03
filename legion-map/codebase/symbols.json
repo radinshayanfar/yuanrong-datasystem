@@ -1,0 +1,81 @@
+{
+  "metadata": {
+    "map_schema_version": "2.0",
+    "generated_at": "2026-07-03T15:36:15Z",
+    "analyzed_commit": "3f18c3d609f3e3859009a41b6ec29591ae8435a9",
+    "source_file_count": 1902,
+    "source_fingerprint": "d8d6722cd603f46a",
+    "source_fingerprint_kind": "hash",
+    "scope": "project-root"
+  },
+  "entry_points": [
+    {"name": "worker_main", "path": "src/datasystem/worker/worker_main.cpp", "kind": "process-main", "summary": "Worker daemon entry point (main()).", "related_chunks": ["map:worker-main:001"]},
+    {"name": "common_server", "path": "src/datasystem/server/common_server.cpp", "kind": "server", "summary": "Server-side assembly/wiring.", "related_chunks": []},
+    {"name": "build.sh", "path": "build.sh", "kind": "build", "summary": "Unified Bazel/CMake build entrypoint.", "related_chunks": ["map:build:001"]},
+    {"name": "setup.py", "path": "setup.py", "kind": "packaging", "summary": "Python wheel build (openyuanrong-datasystem).", "related_chunks": ["map:python-sdk:001"]},
+    {"name": "cli.command", "path": "cli/command.py", "kind": "cli", "summary": "Operational cluster CLI (up/down/start/stop).", "related_chunks": ["map:cli:001"]},
+    {"name": "python_sdk_init", "path": "python/yr/datasystem/__init__.py", "kind": "sdk", "summary": "Python SDK package root.", "related_chunks": ["map:python-sdk:001"]}
+  ],
+  "routes": [],
+  "apis": [
+    {"name": "object contracts", "path": "src/datasystem/protos/master_object.proto", "kind": "proto", "summary": "Object cache metadata + data RPCs (master/worker/posix).", "related_chunks": ["map:protos:001"]},
+    {"name": "stream contracts", "path": "src/datasystem/protos/master_stream.proto", "kind": "proto", "summary": "Stream pub/sub RPCs (master/worker/posix, p2p_subscribe).", "related_chunks": ["map:protos:001", "map:worker-stream:001"]},
+    {"name": "cluster/meta contracts", "path": "src/datasystem/protos/hash_ring.proto", "kind": "proto", "summary": "Heartbeat, hash-ring routing, meta transport, slot recovery.", "related_chunks": ["map:protos:001", "map:hash-ring:001"]},
+    {"name": "generic service", "path": "src/datasystem/protos/generic_service.proto", "kind": "proto", "summary": "Generic RPC service + rpc_option, share_memory, perf.", "related_chunks": ["map:protos:001"]},
+    {"name": "public C++ SDK", "path": "include/datasystem/datasystem.h", "kind": "header-api", "summary": "kv/object/stream/hetero/perf/router client headers.", "related_chunks": ["map:public-api:001"]}
+  ],
+  "modules": [
+    {"name": "client object cache", "path": "src/datasystem/client/object_cache/object_client_impl.cpp", "kind": "module", "summary": "Client object cache (distributed futures). Hot path, high churn.", "related_chunks": ["map:client-object:001"]},
+    {"name": "worker object get", "path": "src/datasystem/worker/object_cache/service/worker_oc_service_get_impl.cpp", "kind": "module", "summary": "Worker object read service. Hot path.", "related_chunks": ["map:worker-object-get:001"]},
+    {"name": "master oc metadata", "path": "src/datasystem/master/object_cache/oc_metadata_manager.cpp", "kind": "module", "summary": "Master object metadata + eviction cleanup. Largest file.", "related_chunks": ["map:master-oc-metadata:001"]},
+    {"name": "worker stream cache", "path": "src/datasystem/worker/stream_cache/client_worker_sc_service_impl.cpp", "kind": "module", "summary": "Worker stream pub/sub service.", "related_chunks": ["map:worker-stream:001"]},
+    {"name": "kv cache client", "path": "src/datasystem/client/kv_cache", "kind": "module", "summary": "Zero-copy shared-memory KV with reliability modes.", "related_chunks": ["map:client-kv:001"]},
+    {"name": "hetero cache client", "path": "src/datasystem/client/hetero_cache", "kind": "module", "summary": "NPU HBM object cache, H2D/D2H, P2P.", "related_chunks": ["map:hetero:001"]},
+    {"name": "cluster manager", "path": "src/datasystem/worker/cluster_manager", "kind": "module", "summary": "Membership, scale-down coordination, route lookup.", "related_chunks": ["map:cluster-manager:001"]},
+    {"name": "hash ring", "path": "src/datasystem/worker/hash_ring", "kind": "module", "summary": "Distributed hash ring routing + scaling.", "related_chunks": ["map:hash-ring:001"]},
+    {"name": "etcd/metastore", "path": "src/datasystem/common/kvstore/etcd", "kind": "module", "summary": "Distributed metadata backend (watch/lease/CAS).", "related_chunks": ["map:etcd:001"]},
+    {"name": "l2cache/slot", "path": "src/datasystem/common/l2cache", "kind": "module", "summary": "Secondary SSD storage, slot store, recovery, compaction.", "related_chunks": ["map:l2cache-slot:001"]},
+    {"name": "rdma/urma", "path": "src/datasystem/common/rdma/urma_manager.cpp", "kind": "module", "summary": "RDMA/URMA fast transport. High churn, memory-sensitive.", "related_chunks": ["map:rdma:001"]},
+    {"name": "shared memory", "path": "src/datasystem/common/shared_memory", "kind": "module", "summary": "Zero-copy SDK<->worker shared-memory path.", "related_chunks": ["map:shared-memory:001"]},
+    {"name": "logging", "path": "src/datasystem/common/log", "kind": "module", "summary": "Logs, trace/context, access recorder, crash handler.", "related_chunks": ["map:logging:001"]},
+    {"name": "metrics", "path": "src/datasystem/common/metrics", "kind": "module", "summary": "Metric families, collector, exporters.", "related_chunks": ["map:metrics:001"]},
+    {"name": "transfer engine", "path": "transfer_engine/src/transfer_engine.cpp", "kind": "module", "summary": "NPU HBM transfer subsystem (ACL/HCCL/P2P).", "related_chunks": ["map:transfer-engine:001"]},
+    {"name": "pybind api", "path": "src/datasystem/pybind_api", "kind": "module", "summary": "pybind11 Python binding registration.", "related_chunks": ["map:pybind:001"]}
+  ],
+  "tests": [
+    {"name": "unit tests (ut)", "path": "tests/ut", "kind": "gtest", "summary": "C++ unit tests (GoogleTest), incl. l2cache/slot_store_test.", "related_chunks": ["map:tests:001"]},
+    {"name": "system tests (st)", "path": "tests/st", "kind": "gtest", "summary": "Multi-process system tests: client/worker/master/cluster/device.", "related_chunks": ["map:tests:001"]},
+    {"name": "perf tests", "path": "tests/perf", "kind": "perf", "summary": "Performance/zmq perf tests.", "related_chunks": ["map:tests:001"]},
+    {"name": "python tests", "path": "tests/python", "kind": "pytest", "summary": "Python SDK tests (ds/kv/oc/sc/tensor clients).", "related_chunks": ["map:tests:001"]},
+    {"name": "benchmarks", "path": "dsbench", "kind": "benchmark", "summary": "Data-system benchmark harness.", "related_chunks": []}
+  ],
+  "config": [
+    {"name": "worker config", "path": "cli/deploy/conf/worker_config.json", "kind": "json", "summary": "Worker deployment config (high churn).", "related_chunks": ["map:cli:001"]},
+    {"name": "worker flags", "path": "src/datasystem/worker/worker_flags.cpp", "kind": "gflags", "summary": "Worker gflag definitions.", "related_chunks": ["map:worker-main:001"]},
+    {"name": "common flags", "path": "src/datasystem/common/flags", "kind": "gflags", "summary": "Shared gflag definitions.", "related_chunks": []},
+    {"name": "bazelrc", "path": ".bazelrc", "kind": "build-config", "summary": "Bazel C++17 build options.", "related_chunks": ["map:build:001"]},
+    {"name": "cmake", "path": "CMakeLists.txt", "kind": "build-config", "summary": "CMake build graph + external libs.", "related_chunks": ["map:build:001"]},
+    {"name": "helm values", "path": "k8s/helm_chart/datasystem/values.yaml", "kind": "deploy", "summary": "Helm chart values (high churn).", "related_chunks": []},
+    {"name": "version", "path": "VERSION", "kind": "version", "summary": "Project version = 0.8.2.", "related_chunks": []}
+  ],
+  "dependencies": [
+    {"name": "third_party (vendored)", "path": "third_party", "kind": "vendored-cpp", "summary": "Vendored C++ deps pinned via WORKSPACE/cmake/external_libs; see Third_Party_Open_Source_Software_Notice.", "related_chunks": []},
+    {"name": "protobuf", "path": "src/datasystem/protos", "kind": "codegen", "summary": "Protobuf RPC contract codegen (high fan-in).", "related_chunks": ["map:protos:001"]},
+    {"name": "pybind11", "path": "src/datasystem/pybind_api", "kind": "binding", "summary": "Python binding runtime.", "related_chunks": ["map:pybind:001"]},
+    {"name": "go module", "path": "go/go.mod", "kind": "go", "summary": "Go module 'clients' (go 1.17) over C API.", "related_chunks": []}
+  ],
+  "ownership": [
+    {"name": "Client SDK", "path": "src/datasystem/client", "kind": "area", "summary": "Public API + shared-memory data path.", "related_chunks": ["map:client-object:001", "map:client-kv:001", "map:public-api:001"]},
+    {"name": "Worker runtime", "path": "src/datasystem/worker", "kind": "area", "summary": "Resource/metadata ownership, cache services, membership.", "related_chunks": ["map:worker-object-get:001", "map:worker-stream:001", "map:worker-main:001"]},
+    {"name": "Master", "path": "src/datasystem/master", "kind": "area", "summary": "Metadata + replica management.", "related_chunks": ["map:master-oc-metadata:001"]},
+    {"name": "Shared infra", "path": "src/datasystem/common", "kind": "area", "summary": "rdma, l2cache, log, metrics, rpc, kvstore, shared_memory.", "related_chunks": ["map:rdma:001", "map:l2cache-slot:001", "map:etcd:001", "map:logging:001", "map:metrics:001"]},
+    {"name": "Transfer engine", "path": "transfer_engine", "kind": "area", "summary": "NPU HBM transfer subsystem.", "related_chunks": ["map:transfer-engine:001"]},
+    {"name": "Ops/deploy", "path": "cli", "kind": "area", "summary": "Cluster lifecycle + config/helm generation.", "related_chunks": ["map:cli:001"]}
+  ],
+  "risk_areas": [
+    {"name": "Object-cache hot path", "path": "src/datasystem/client/object_cache/object_client_impl.cpp", "kind": "hotpath", "summary": "4132 LOC, 36 changes/90d; core get path. Assess latency/locks/copies.", "risk": "high", "related_chunks": ["map:client-object:001", "map:worker-object-get:001"]},
+    {"name": "Master metadata manager", "path": "src/datasystem/master/object_cache/oc_metadata_manager.cpp", "kind": "complexity", "summary": "4819 LOC largest file; eviction cleanup + replica metadata. Crash-consistency critical.", "risk": "high", "related_chunks": ["map:master-oc-metadata:001"]},
+    {"name": "RDMA/URMA transport", "path": "src/datasystem/common/rdma/urma_manager.cpp", "kind": "concurrency-memory", "summary": "31 changes/90d; buffer lifetime/registration sensitive.", "risk": "medium", "related_chunks": ["map:rdma:001"]},
+    {"name": "Slot/recovery path", "path": "src/datasystem/common/l2cache/slot_client", "kind": "persistence-recovery", "summary": "Replay/compaction/takeover on restart; assess partial writes + idempotency.", "risk": "medium", "related_chunks": ["map:l2cache-slot:001"]}
+  ]
+}

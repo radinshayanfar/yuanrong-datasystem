@@ -1,0 +1,143 @@
+= Product Requirements Document — openYuanrong DataSystem
+:doctype: book
+:toc: left
+:sectnums:
+
+// Synthesized by Socratic Code-Theory Recovery, Phase 2, from the Q1 branch of the
+// answered Question Tree. Code-derived claims cite [file:line] evidence. Facts with
+// no code evidence are marked (team answer). This document is self-contained.
+
+== Problem Statement
+
+openYuanrong DataSystem is a distributed, multi-level caching system for compute
+clusters. It stores data across DRAM, SSD, and device HBM and exposes it to
+application processes over a zero-copy shared-memory path, so co-located producers
+and consumers can share large payloads without serialization or network copies
+[README_EN.md:34, include/datasystem/datasystem.h:33, src/datasystem/worker/worker_main.cpp:52].
+
+The originating problem was accelerating in-house LLM-inference products: DataSystem
+was extracted to serve those products and then generalized into a reusable
+openYuanrong platform component. Replacing an external cache (Redis/Alluxio-style)
+was a side effect of that work, not the motivation (team answer).
+
+The concrete pain it targets is the LLM inference KVCache: attention key/value tensors
+must be retained and re-shared across inference steps, processes, and nodes at very
+low latency and high throughput, which a copy-based cache cannot deliver.
+
+== Target Users
+
+DataSystem ships as two halves of one bounded context — an SDK (`DsClient`) linked
+into user processes, and a per-node `datasystem_worker` runtime — and its users fall
+into two personas.
+
+=== Application developer (in-process API user)
+Integrates one of four client families against the local worker
+[include/datasystem/kv_client.h:75, include/datasystem/object_client.h:53, include/datasystem/stream_client.h:42, include/datasystem/hetero_client.h:45]:
+
+* `KVClient` — key/value cache.
+* `ObjectClient` — reference-counted shared-memory objects.
+* `StreamClient` — producer/consumer pub-sub streams.
+* `HeteroClient` — NPU/GPU device (HBM) memory transfer.
+
+The API is reachable from C++, Python (pybind11), C/Go (C API bridge), and Java (JNI)
+against the same worker [src/datasystem/pybind_api/pybind_register.cpp:39, src/datasystem/c_api/kv_client_c_wrapper.h:57, src/datasystem/java_api/kv/org_yuanrong_datasystem_kv_KVClient.cpp:37].
+
+=== Cluster operator (deployer)
+Drives deployment through the `dscli` CLI (`start`, `stop`, `up`, `down`,
+`generate_helm_chart`), targeting a worker + ETCD topology
+[cli/command.py:1, cli/start.py:1, cli/stop.py:1, README_EN.md:153].
+
+=== Platform position
+DataSystem is one of three openYuanrong repositories (runtime, function system, data
+system). The runtime and function system consume DataSystem through the SDK as an
+optional data plane; the coupling is API-level (Object/KV/hetero calls) with no hard
+build-time dependency in the reverse direction (team answer).
+
+== Goals
+
+Stated top-level product goals, as embodied in code and README
+[README_EN.md:36, CLAUDE.md:3]:
+
+. High-performance zero-copy multi-level caching (DRAM/SSD/HBM).
+. Efficient inter-NPU / host↔device transfer.
+. Flexible object lifecycle management (reference-counted sharing).
+. Hot-data replication and high availability.
+. Selectable reliability (write durability) and consistency models.
+. Publish/subscribe streaming.
+. Horizontal scaling of metadata across nodes.
+
+== Success Criteria
+
+Target SLOs that define "working well" (team answer):
+
+[cols="1,2"]
+|===
+| Metric | Target
+
+| Shared-memory Get latency | single-digit microseconds
+| Per-node throughput | multi-GB/s
+| KVCache hit ratio | ≥ 90%
+| Availability | ≥ 99.9%
+|===
+
+These targets back the in-code mechanism knobs: the 100 MB no-copy threshold protects
+the zero-copy latency budget, and the failover timers target sub-few-second RTO with
+near-zero RPO under `WRITE_THROUGH` (team answer)
+[src/datasystem/common/util/gflag/common_gflag_define.cpp:91, :105, :89].
+
+Performance is a *verifiable* acceptance criterion: a build should fail on a >~5–10%
+p99 latency or throughput regression versus the recorded baseline; smaller deltas are
+treated as noise (team answer). Executable perf suites exist to measure against this
+bar [tests/perf/BUILD.bazel:1, dsbench/].
+
+== Scope
+
+=== In scope (priority order)
+The primary customer today is **LLM KVCache-for-inference**, which is first among
+equals and drives roadmap ordering; the heterogeneous/NPU paths exist primarily to
+serve it (team answer). Next-in-line are **M→N elasticity** and **RL parameter
+rearrangement** (team answer). Supported scenarios are enumerated at
+[README_EN.md:47-53].
+
+=== Aspirational / opportunistic
+**Checkpoint** and **microservice state** are supported by the API surface but are
+aspirational/opportunistic rather than primary today (team answer).
+
+=== Out of scope / compile-time optional
+The heterogeneous (NPU/GPU) and fast-transport (RDMA/URMA/UCX) paths are compile-time
+optional; a build without `BUILD_HETERO` does not ship the device-transfer use case
+[CMakeLists.txt:122-133]. Worker-worker RDMA/UB transport is future work; the current
+release transports over TCP [src/datasystem/worker/worker_oc_server.cpp:558, README_EN.md:81].
+
+== Constraints
+
+* Linux / x86-64 only (epoll, `/dev/shm`, POSIX shared memory), glibc 2.34+ recommended
+  [README_EN.md:97-99, src/datasystem/common/eventloop/event_loop.h:32, src/datasystem/common/shared_memory/allocator.h:39].
+* C++17 core built with GCC; Python SDK targets Python ≥ 3.9
+  [.bazelrc:1, setup.py:259].
+* An external ETCD cluster is a hard runtime dependency for coordination; a built-in
+  Metastore is an alternative backend
+  [README_EN.md:74, src/datasystem/common/kvstore/metastore/metastore_server.h:39].
+* Security is trusted-network, single-tenant-per-cluster: plaintext transport is
+  acceptable inside that boundary, with optional ZMQ CURVE encryption; no formal
+  compliance framework is in scope and the threat model is internal abuse, not an
+  external attacker (team answer). The in-code default `encrypt_kit` is "plaintext"
+  [src/datasystem/common/util/gflag/common_gflag_define.cpp:44].
+
+== Quality-Goal Priority
+
+When quality characteristics conflict, the fixed ranking is **correctness first, then
+availability, then latency**; during failover availability outranks latency, and this
+ordering does not change per use-case (team answer). This ranking governs the
+architecture decisions recorded in the ADRs.
+
+== Open Questions / Gaps
+
+All Phase-1 OPEN leaves were answered by the team; no product-level questions remain
+deferred. Residual risks the team flagged for tracking rather than resolution:
+
+* Validated scale ceiling is hundreds of nodes per cluster, millions of keys per
+  master, and a few GB of metadata per worker; beyond that, scaling risk is real and
+  untested (team answer).
+* There is no in-repo on-call runbook; production runbooks, alert thresholds, and
+  escalation paths live in the operating team's internal ops wiki (team answer).

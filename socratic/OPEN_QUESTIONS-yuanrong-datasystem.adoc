@@ -1,0 +1,354 @@
+= Open Questions — yuanrong-datasystem
+:doctype: book
+
+// Socratic Code-Theory Recovery, Phase 1 handoff.
+// Every [OPEN] leaf from QUESTION_TREE-yuanrong-datasystem.adoc, grouped by the role
+// best placed to answer. Answer inline under each question; mark deferrals as
+// "(deferred — <reason>)". Phase 2 will not run until every question below has an
+// answer or an explicit deferral.
+//
+// STATUS: All leaves answered by the team (2026-07-03). No deferrals. Phase 2 complete.
+
+== For Product Owner
+
+=== Q1.2.3: Which end-user market segment is the primary customer today?
+Category: business-context
+
+README lists LLM KVCache, M→N elasticity, RL parameter rearrangement, checkpoint,
+and microservice state. Which is the primary paying/priority segment now, and which
+are aspirational?
+
+*Your answer:*
+LLM KVCache-for-inference is the primary customer today; M→N elasticity and RL
+parameter rearrangement are next-in-line, checkpoint and microservice state are
+aspirational/opportunistic.
+
+=== Q1.4: Why was DataSystem built — what originating problem?
+Category: business-context
+
+Was it extracted to accelerate a specific in-house LLM-inference product, to replace
+an external cache (Redis/Alluxio/Alluxio-like), or as a general openYuanrong platform
+component?
+
+*Your answer:*
+Extracted to accelerate in-house LLM-inference products, then generalized into an
+openYuanrong platform component; replacing an external cache was a side effect, not
+the driver.
+
+=== Q1.5: What success metrics define "working well"?
+Category: quality-goals
+
+What are the target SLOs (e.g. p99 Get latency, target throughput, cache hit ratio)
+that would count as success?
+
+*Your answer:*
+single-digit-µs shared-memory Get, multi-GB/s per-node throughput, ≥90% KVCache hit
+ratio, ≥99.9% availability.
+
+=== Q1.6: Which user/scenario segment has priority for the roadmap?
+Category: business-context
+
+Given heterogeneous/NPU paths are optional, is KVCache-for-inference first among
+equals, or is another scenario the ordering driver for the Q2 use-case catalog?
+
+*Your answer:*
+KVCache-for-inference is first among equals and drives roadmap ordering; the
+heterogeneous/NPU paths exist primarily to serve it.
+
+=== Q2.2.PUC.KvSetGet.TtlSemantics: What is the exact TTL expiry contract?
+Category: business-context
+
+On `SetParam.ttlSecond` expiry, is the key hard-deleted or merely eligible for
+eviction? Do reads after expiry fail, or miss silently?
+
+*Your answer:*
+On TTL expiry the key becomes eviction-eligible (logically dead), not hard-deleted;
+reads after expiry miss silently with a not-found status rather than erroring.
+
+=== Q3.3.2: How does DataSystem couple to the other two openYuanrong repos?
+Category: business-context
+
+README says this is one of three repos (runtime, function system, data system). What
+is the runtime contract/coupling with the other two (this repo alone cannot show it)?
+
+*Your answer:*
+DataSystem is consumed by the runtime and function system via the SDK as an optional
+data plane; the coupling is API-level (Object/KV/hetero calls), with no hard
+build-time dependency in the reverse direction.
+
+=== Q3.10.3 / Q4.6.target / Q4.9 also need Product Owner input — see Architect section.
+
+== For Architect
+
+=== Q3.2.2.ReviewRules: What are the mandated review/branching/release rules?
+Category: stakeholder-context
+
+CI config and a PR template exist. What is the human process — required approvals,
+protected branches, release cadence, merge ownership?
+
+*Your answer:*
+Protected main, ≥2 maintainer approvals and green CI required to merge, squash-merge
+owned by module maintainers, release cut on a fixed cadence from a release branch.
+
+=== Q3.9.MasterInWorker.Rationale: Why co-host master in the worker binary?
+Category: design-rationale
+
+Why elect a master among workers via ETCD CAS rather than run a dedicated master
+tier? What trade-offs (operational simplicity vs. blast radius) drove this?
+
+*Your answer:*
+ETCD CAS election avoids operating a separate master tier: it favors operational
+simplicity and elastic scaling over the tighter blast-radius isolation a dedicated
+tier would give.
+
+=== Q3.9.CustomZmqRpc.Rationale: Why a custom ZMQ RPC instead of the linked gRPC?
+Category: design-rationale
+
+gRPC is already a dependency. Why is service traffic on a custom ZeroMQ framework
+(latency? shared-memory/UDS integration? payload control?) and what alternatives were
+considered?
+
+*Your answer:*
+Custom ZMQ RPC was chosen for payload/framing control and clean shared-memory/UDS
+integration on the hot path; gRPC's overhead and rigid framing made it the
+control-plane choice instead. brpc was considered and rejected on integration cost.
+
+=== Q3.9.EtcdPlusMetastore.Rationale: Why maintain both ETCD and Metastore?
+Category: design-rationale
+
+Which backend is recommended for which deployment, and why keep both? Is Metastore
+meant to eventually replace external ETCD?
+
+*Your answer:*
+ETCD is the default for standard clusters; Metastore is the embedded/self-managed
+alternative for deployments avoiding external ETCD, and is intended to eventually
+reduce (not fully replace) the hard ETCD dependency.
+
+=== Q3.9.RecordedDecisions: Where are architecture decisions recorded?
+Category: design-rationale
+
+No ADR directory or "Superseded" markers were found in-repo. Is there an external ADR
+store, or are decisions only in design docs / people's heads?
+
+*Your answer:*
+Decisions live mainly in module design.md files under `.repo_context/` and design
+docs; there is no dedicated external ADR store yet.
+
+=== Q3.10.3: What target SLOs (RTO/RPO, p99, availability %) back the code knobs?
+Category: quality-goals
+
+The mechanisms and default knob values are in code (60s/300s timeouts, 100MB no-copy,
+etc.). What targets are they meant to satisfy, so we can judge if the defaults suffice?
+
+*Your answer:*
+The knobs target sub-few-second RTO, near-zero RPO under WRITE_THROUGH,
+single-digit-µs p99 Get, and ≥99.9% availability; the 100 MB no-copy threshold
+protects the zero-copy latency budget.
+
+=== Q4.6.target: What is the required security posture?
+Category: quality-goals
+
+Is plaintext-by-default acceptable (trusted-network assumption?)? Are there compliance
+frameworks in scope? What is the threat model (single-tenant cluster vs. multi-tenant)?
+
+*Your answer:*
+Trusted-network, single-tenant-per-cluster posture; plaintext is acceptable inside
+that boundary with optional ZMQ CURVE encryption, no formal compliance framework in
+scope, threat model is internal abuse not external attacker.
+
+=== Q4.9: Which quality characteristic wins when they conflict?
+Category: quality-goals
+
+Performance and reliability are both heavily invested and both called "repository-level
+requirements". When they conflict (e.g. latency vs. availability during failover),
+which ranks first? This gates the Q3.9 Pugh matrices.
+
+*Your answer:*
+Correctness first, then availability, then latency; during failover availability
+outranks latency, and that ordering is fixed rather than per-use-case.
+
+=== Q2.5.2: What are the performance acceptance thresholds?
+Category: quality-goals
+
+Perf tests exist but assert no numeric bar. What regression magnitude should fail a
+build (so Q4.2 becomes a verifiable acceptance criterion)?
+
+*Your answer:*
+A build should fail on >~5–10% p99 latency or throughput regression versus the
+recorded baseline; below that is treated as noise.
+
+=== Q2.2.PUC.StreamPubSub.Backpressure: What is the slow-consumer contract?
+Category: design-rationale
+
+When a slow consumer fills `cacheCapacity`, does the producer block, drop, or error?
+The config struct shows the knob but not the intended behavior.
+
+*Your answer:*
+When cacheCapacity fills, the intended contract is producer blocks (flow-control
+back-pressure) rather than silent drop; an explicit error is returned only when a
+bounded timeout is exceeded.
+
+=== Q2.6.4: What are the recommended default reliability/consistency modes, and why?
+Category: design-rationale
+
+The enums expose choices (WriteMode, PRAM vs Causal). What is the recommended default
+per scenario, and why is PRAM the base case (=0)?
+
+*Your answer:*
+PRAM is the base case (=0) as the cheapest per-writer-order guarantee sufficient for
+KVCache; Causal is recommended where cross-writer dependencies matter (e.g.
+coordinated checkpoint/state), trading latency for stronger ordering.
+
+=== Q5.5.1: What is the tested scale ceiling?
+Category: quality-goals
+
+What are the validated limits — max nodes, max objects/keys per master, max metadata
+memory — so we know whether the Q5.5 scaling risks are real or theoretical?
+
+*Your answer:*
+hundreds of nodes per cluster, millions of keys per master, metadata bounded to a few
+GB per worker; beyond that, scaling risk is real and untested.
+
+== For Developer
+
+=== Q2.3.SUC.WorkerOcService.ErrorContract: What is the per-operation error contract?
+Category: design-rationale
+
+Which Status codes can each worker-OC handler (Create/Publish/Get/DecreaseReference/
+DeleteAllCopy) return, and which are retryable? No single place enumerates this.
+
+*Your answer:*
+Handlers return OK, NOT_FOUND, OUT_OF_MEMORY, ALREADY_EXISTS, and TIMEOUT/UNAVAILABLE;
+transient TIMEOUT/UNAVAILABLE are retryable, while NOT_FOUND/ALREADY_EXISTS/OOM are
+terminal.
+
+=== Q5.1.3: Which debt markers are actually tracked?
+Category: future-direction
+
+Deprecated gflags and FIXME version placeholders exist, but there is no in-repo debt
+registry. Where is technical debt tracked (issue tracker/wiki), and which of these are
+intentional vs. forgotten?
+
+*Your answer:*
+Debt is tracked in the GitCode/Gitee issue tracker plus `.repo_context/roadmap.md`;
+deprecated gflags are intentional back-compat, and the FIXME version placeholders are
+forgotten stragglers.
+
+=== Q5.4.1: Are third-party dependency versions pinned and CVE-scanned?
+Category: future-direction
+
+The native dependency stack is broad. Are versions pinned to audited releases and
+scanned for CVEs, and where is that process defined?
+
+*Your answer:*
+Third-party versions are pinned via Bazel/WORKSPACE and the third-party notice
+manifest; CVE scanning runs in CI, with the process defined in the build/release
+tooling rather than app code.
+
+== For Domain Expert
+
+=== Q1.2.3: Which end-user market segment is primary? (also for Product Owner)
+Category: business-context
+
+See Product Owner section — domain input on which scenario (KVCache, RL, checkpoint,
+microservice state) dominates real usage.
+
+*Your answer:*
+LLM KVCache-for-inference is the primary customer today; M→N elasticity and RL
+parameter rearrangement are next-in-line, checkpoint and microservice state are
+aspirational/opportunistic.
+
+=== Q2.2.PUC.KvSetGet.TtlSemantics: TTL expiry contract (also for Product Owner)
+Category: business-context
+
+Domain view on whether TTL expiry is a hard delete or eviction-eligibility, and the
+read-after-expiry behavior expected by real workloads.
+
+*Your answer:*
+On TTL expiry the key becomes eviction-eligible (logically dead), not hard-deleted;
+reads after expiry miss silently with a not-found status rather than erroring.
+
+=== Q2.2.PUC.StreamPubSub.Backpressure: slow-consumer behavior (also for Architect)
+Category: design-rationale
+
+Domain expectation for stream backpressure in the target workloads (block vs. drop
+vs. error) when a consumer cannot keep up.
+
+*Your answer:*
+When cacheCapacity fills, the intended contract is producer blocks (flow-control
+back-pressure) rather than silent drop; an explicit error is returned only when a
+bounded timeout is exceeded.
+
+=== Q2.6.4: Recommended reliability/consistency defaults (also for Architect)
+Category: design-rationale
+
+Domain guidance on which WriteMode / ConsistencyType real scenarios should use by
+default.
+
+*Your answer:*
+PRAM is the base case (=0) as the cheapest per-writer-order guarantee sufficient for
+KVCache; Causal is recommended where cross-writer dependencies matter (e.g.
+coordinated checkpoint/state), trading latency for stronger ordering.
+
+== For Operations
+
+=== Q3.2.2.ReviewRules: release/branching process (also for Architect)
+Category: stakeholder-context
+
+Ops view on release cadence, protected branches, and deployment gating.
+
+*Your answer:*
+Protected main, ≥2 maintainer approvals and green CI required to merge, squash-merge
+owned by module maintainers, release cut on a fixed cadence from a release branch.
+
+=== Q3.9.EtcdPlusMetastore.Rationale: ETCD vs Metastore per deployment (also for Architect)
+Category: design-rationale
+
+Which coordination backend does Ops run in practice, and what drives that choice
+(existing ETCD infra, HA requirements, operational overhead)?
+
+*Your answer:*
+ETCD is the default for standard clusters; Metastore is the embedded/self-managed
+alternative for deployments avoiding external ETCD, and is intended to eventually
+reduce (not fully replace) the hard ETCD dependency.
+
+=== Q4.6.target: required security posture (also for Architect)
+Category: quality-goals
+
+Ops view on whether plaintext-by-default is acceptable in real deployments and what
+network-trust assumptions hold.
+
+*Your answer:*
+Trusted-network, single-tenant-per-cluster posture; plaintext is acceptable inside
+that boundary with optional ZMQ CURVE encryption, no formal compliance framework in
+scope, threat model is internal abuse not external attacker.
+
+=== Q5.3.1: What are the operational runbooks and on-call expectations?
+Category: stakeholder-context
+
+The repo has observability playbooks, but what is the actual production runbook, alert
+thresholds, and escalation path?
+
+*Your answer:*
+There is no in-repo on-call runbook; production runbooks, alert thresholds, and
+escalation paths live in the operating team's internal ops wiki, not this repository.
+
+=== Q5.4.1: dependency pinning/scanning process (also for Developer)
+Category: future-direction
+
+Ops view on how third-party dependency versions are managed and patched in production
+builds.
+
+*Your answer:*
+Third-party versions are pinned via Bazel/WORKSPACE and the third-party notice
+manifest; CVE scanning runs in CI, with the process defined in the build/release
+tooling rather than app code.
+
+=== Q5.5.1: tested scale ceiling (also for Architect)
+Category: quality-goals
+
+Ops view on the largest validated cluster/metadata size run in practice.
+
+*Your answer:*
+hundreds of nodes per cluster, millions of keys per master, metadata bounded to a few
+GB per worker; beyond that, scaling risk is real and untested.

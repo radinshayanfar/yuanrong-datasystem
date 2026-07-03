@@ -1,0 +1,56 @@
+= ADR 002 — Use a custom ZeroMQ RPC framework instead of gRPC for service traffic
+:doctype: article
+
+// Synthesized by Socratic Code-Theory Recovery, Phase 2, from the Q3.9 branch.
+// Nygard format. Pugh matrix scored against the Q4 quality goals.
+
+== Status
+Accepted (as-built).
+
+== Context
+DataSystem's service traffic (object-cache, stream-cache, master coordination,
+worker-worker transport) runs on a custom RPC framework built over ZeroMQ sockets (TCP
+or Unix-domain), with optional CURVE authentication — even though gRPC is already a
+linked dependency [src/datasystem/common/rpc/rpc_server.h:41, src/datasystem/common/rpc/zmq/zmq_server_impl.h:51, src/datasystem/common/rpc/zmq/zmq_auth.h:78, cmake/dependency.cmake:11, :17].
+
+The hot path is the SDK ↔ worker shared-memory exchange, where latency and payload
+framing control matter; the quality priority is correctness > availability > latency
+(team answer).
+
+== Decision
+Make the custom ZeroMQ RPC framework the primary service transport; retain gRPC for
+control-plane use rather than data-plane service traffic.
+
+Rationale (team answer): the custom ZMQ RPC was chosen for payload/framing control and
+clean shared-memory/UDS integration on the hot path. gRPC's overhead and rigid framing
+made it the control-plane choice instead. brpc was considered and rejected on
+integration cost.
+
+== Consequences
+* (+) Fine-grained control over payload framing and chunking (e.g. 1 MB ZMQ chunking, zero-copy above 100 MB) [src/datasystem/common/util/gflag/common_gflag_define.cpp:114, :91].
+* (+) Clean Unix-domain-socket / shared-memory integration for the co-located SDK ↔ worker path [src/datasystem/common/rpc/zmq/zmq_server_impl.h:51].
+* (−) A bespoke framework is more code to own, test, and secure than an off-the-shelf gRPC stack (maintainability cost).
+* (−) Two transports coexist (ZMQ + gRPC), adding surface area [cmake/dependency.cmake:11, :17].
+
+== Alternatives Considered (Pugh Matrix)
+Baseline (0) = the chosen design (custom ZeroMQ RPC). Scale: -1 / 0 / +1.
+
+[cols="2,1,1,1", options="header"]
+|===
+| Quality goal (Q4) | Custom ZMQ RPC (baseline) | gRPC for service traffic | brpc
+
+| Correctness (priority 1) | 0 | 0 | 0
+| Availability (priority 2) | 0 | 0 | 0
+| Latency/performance (priority 3) | 0 | -1 | 0
+| Payload/framing control | 0 | -1 | 0
+| Shared-memory/UDS integration | 0 | -1 | -1
+| Maintainability (own less code) | 0 | +1 | +1
+| Integration cost | 0 | 0 | -1
+| *Weighted lean* | *baseline* | *simpler, slower hot path* | *rejected on integration cost*
+
+|===
+
+gRPC scores better on maintainability but worse on the latency/framing/integration
+axes that dominate the hot path; brpc offered no framing/integration advantage and was
+rejected on integration cost (team answer). The custom framework wins under the stated
+priority once latency and payload control are weighted for the data plane.

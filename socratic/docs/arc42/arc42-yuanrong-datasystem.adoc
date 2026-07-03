@@ -1,0 +1,190 @@
+= Architecture (arc42) — openYuanrong DataSystem
+:doctype: book
+:toc: left
+:sectnums:
+
+// Synthesized by Socratic Code-Theory Recovery, Phase 2, from the Q3/Q4 branches of
+// the answered Question Tree. All 12 arc42 chapters are emitted. Code-derived claims
+// cite [file:line]; team-supplied facts are marked (team answer). Chapter 10 is
+// synthesized from the Q4 quality scenarios plus the Q4.9 ranking.
+
+== Introduction and Goals
+
+openYuanrong DataSystem is a high-performance, highly-available distributed
+multi-level (DRAM/SSD, plus device HBM) caching system for compute clusters. It ships
+as an SDK (`DsClient`) linked into user processes and a per-node `datasystem_worker`
+runtime process [README_EN.md:34, include/datasystem/datasystem.h:33, src/datasystem/worker/worker_main.cpp:52].
+
+Top-level goals [README_EN.md:36, CLAUDE.md:3]: high-performance zero-copy multi-level
+caching, efficient inter-NPU transfer, flexible lifecycle management, hot-data
+replication, selectable reliability/consistency, pub-sub, and high availability with
+horizontal metadata scaling.
+
+Target SLOs (team answer): single-digit-µs shared-memory Get, multi-GB/s per-node
+throughput, ≥ 90% KVCache hit ratio, ≥ 99.9% availability. The primary driving
+scenario is LLM KVCache-for-inference (team answer).
+
+*Quality goal priority (team answer):* correctness first, then availability, then
+latency. During failover, availability outranks latency, and this ordering is fixed
+rather than per-use-case. See Chapter 10.
+
+== Architecture Constraints
+
+=== Technical constraints
+* C++17 core built with GCC; Python SDK targets Python ≥ 3.9 [.bazelrc:1, CMakeLists.txt (CMAKE_CXX_STANDARD 17), setup.py:259, .bazelrc:69].
+* `std::regex` is banned — the build fails compilation on any `#include <regex>`; re2 is mandated [CMakeLists.txt:183-185].
+* Mandatory third-party stack: Abseil, re2, zlib, ZeroMQ, RocksDB, protobuf, gRPC, etcd C API, Intel TBB [cmake/dependency.cmake:5-24, src/datasystem/master/object_cache/oc_metadata_manager.h:227].
+* External ETCD is a hard runtime dependency for cluster management; a built-in Metastore alternative exists [README_EN.md:74, src/datasystem/common/kvstore/metastore/metastore_server.h:39].
+* Linux-only (epoll, `/dev/shm`, POSIX shared memory), x86-64, glibc 2.34+ recommended [README_EN.md:97-99, src/datasystem/common/eventloop/event_loop.h:32, src/datasystem/common/shared_memory/allocator.h:39].
+
+=== Organizational / process constraints
+* Both Bazel and CMake build systems are maintained in parallel; changes must build under both [build.sh:20, WORKSPACE:1, CMakeLists.txt:1].
+* CI (GitHub + Gitee mirrors) and a PR template gate contributions [.github/workflows/, .gitee/PULL_REQUEST_TEMPLATE/].
+* Review/branching/release rules (team answer): protected `main`, ≥ 2 maintainer approvals and green CI required to merge, squash-merge owned by module maintainers, release cut on a fixed cadence from a release branch.
+
+=== Conventional constraints
+* clang-format (Google base, col 120, 4-space indent) and clang-tidy (bugprone/performance/readability/clang-analyzer) are checked in and strict; `-Werror` makes warnings fatal [.clang-format:1, .clang-tidy:1].
+* Every source file carries a Huawei copyright + Apache-2.0 header [src/datasystem/master/replica_rpc_channel_impl.cpp:2-14, LICENSE:1].
+
+== System Scope and Context
+
+Boundary flows [README_EN.md:78-82]: SDK ↔ worker over shared memory; worker ↔ worker
+over TCP (RDMA/UB future); device HBM ↔ HBM over HCCS/RoCE; worker ↔ ETCD for
+coordination.
+
+*Position within openYuanrong (team answer):* DataSystem is one of three repos
+(runtime, function system, data system). The runtime and function system consume
+DataSystem via the SDK as an optional data plane; the coupling is API-level
+(Object/KV/hetero calls), with no hard build-time dependency in the reverse direction.
+
+== Solution Strategy
+
+The strategy the code embodies [src/datasystem/common/shared_memory/allocator.h:39, src/datasystem/worker/hash_ring/hash_ring.h:130, src/datasystem/master/replica_manager.h:77, src/datasystem/common/l2cache/l2_storage.h:31]:
+
+* Zero-copy shared memory for the SDK ↔ worker hot path.
+* Consistent-hash sharding of metadata across workers.
+* A replicated, elected master for metadata HA.
+* A pluggable tiered L2 persistence layer.
+
+The rationale behind these choices is recorded in the ADRs (see also Chapter 9). Key
+team-supplied rationale: the master is co-hosted and elected via ETCD CAS to favor
+operational simplicity and elastic scaling; the custom ZMQ RPC was chosen for
+payload/framing control and shared-memory/UDS integration on the hot path (team answer).
+
+== Building Block View
+
+[cols="1,3"]
+|===
+| Block | Responsibility
+
+| Client SDK (`src/datasystem/client`) | SDK-side clients, worker connection/discovery, shared-memory mmap manager [src/datasystem/client/datasystem.cpp:26, src/datasystem/client/mmap_manager.cpp:1].
+| Worker runtime (`src/datasystem/worker`) | `Worker` owns a `WorkerOCServer` composing object-cache and stream-cache services (client-facing, worker-worker, master-worker variants) [src/datasystem/worker/worker.h:87, src/datasystem/worker/worker_oc_server.h:569].
+| Master/coordination (`src/datasystem/master`) | Metadata management, replica/election management, worker/node/resource managers; instantiated only on the elected master [src/datasystem/master/master_service_impl.h:51, src/datasystem/master/replica_manager.h:77, src/datasystem/master/worker_manager.h:159].
+| RPC / server assembly (`src/datasystem/server` + `common/rpc`) | Custom RPC layer (ZeroMQ transport, endpoint builder, event loop) all services register onto [src/datasystem/server/common_server.cpp:55, src/datasystem/common/rpc/rpc_server.h:41].
+| Shared memory (`common/shared_memory`) | Pre-allocates `/dev/shm` arenas, hands out zero-copy regions (NUMA-aware) [src/datasystem/common/shared_memory/allocator.h:39, src/datasystem/common/shared_memory/arena.h:71].
+| L2 cache (`common/l2cache`) | Persistence behind `PersistenceApi`, backend chosen from `l2_cache_type`, distributed-disk slot client [src/datasystem/common/l2cache/persistence_api.h:32, src/datasystem/common/l2cache/l2_storage.cpp:24].
+| Cluster / kvstore (`common/kvstore`) | `KvStore` abstraction over ETCD and built-in Metastore; hash-ring and cluster-manager consume it [src/datasystem/common/kvstore/kv_store.h:31, src/datasystem/worker/cluster_manager/etcd_cluster_manager.h:75].
+| Language bindings | `pybind_api`, `c_api`, `java_api` wrap the C++ clients for Python, C/Go, Java [src/datasystem/pybind_api/pybind_register.cpp:39, src/datasystem/c_api/kv_client_c_wrapper.h:57, src/datasystem/java_api/kv/org_yuanrong_datasystem_kv_KVClient.cpp:37].
+| Transfer engine (`transfer_engine/`) | NPU-oriented data-transfer subsystem, compiled only for NPU hetero builds [CMakeLists.txt:153-157].
+|===
+
+== Runtime View
+
+* *Worker startup:* parse flags → `InitWorker` → construct `WorkerOCServer` (worker/bind/master addresses, pre-init RocksDB) → `CommonServer` builds+starts the RPC server → main loop polls termination with metrics/config ticks [src/datasystem/worker/worker_main.cpp:52, src/datasystem/worker/worker.cpp:312, :245, src/datasystem/server/common_server.cpp:66].
+* *Master election at init:* each node checks mastership via ETCD; the master runs Master/Replication services; election is ETCD compare-and-swap on `/datasystem/replica_group` [src/datasystem/worker/worker_oc_server.cpp:676, src/datasystem/master/replica_manager.cpp:535].
+* *Object Get path:* resolve location via master `QueryMeta`, then stream the payload; payloads above the 100 MB no-copy threshold take the zero-copy path [src/datasystem/worker/object_cache/worker_oc_service_impl.h:276, src/datasystem/master/object_cache/oc_metadata_manager.h:384, src/datasystem/common/util/gflag/common_gflag_define.cpp:91].
+* *Membership / heartbeat:* workers heartbeat the master; nodes transition TIMEOUT at 60 s and OFFLINE at 300 s; ETCD leases renewed by a keepalive task [src/datasystem/master/master_service_impl.cpp:46, src/datasystem/master/node_descriptor.h:51, :57, src/datasystem/common/kvstore/etcd/etcd_store.h:536].
+* *Failover / recovery:* replica manager promotes a backup to primary, metadata reselects primary copies, restarted workers reconcile, and distributed-disk slots recover via round-robin tasks [src/datasystem/master/replica_manager.cpp:816, src/datasystem/master/object_cache/oc_metadata_manager.h:480, :496, src/datasystem/worker/object_cache/slot_recovery/slot_recovery_manager.h:92].
+* *Scale-up / scale-down:* adding a node inserts virtual tokens into the ring; voluntary scale-down is flagged via cluster manager and drives metadata migration in batches of 300 objects [src/datasystem/worker/hash_ring/hash_ring.cpp:603, src/datasystem/worker/cluster_manager/etcd_cluster_manager.h:107, src/datasystem/master/object_cache/oc_migrate_metadata_manager.cpp:1].
+
+== Deployment View
+
+One worker process per node (default listen 127.0.0.1:31501) registered to a shared
+ETCD; the SDK is linked into each user process and talks to the local worker.
+Kubernetes deployment is a per-node DaemonSet via Helm
+[README_EN.md:72-76, src/datasystem/worker/worker_flags.cpp:25, cli/generate_helm_chart.py:1, k8s_deployment/].
+
+== Cross-cutting Concepts
+
+* *Custom RPC over ZeroMQ:* all service RPC is a custom framework over ZeroMQ sockets (TCP or UDS), with optional CURVE authentication [src/datasystem/common/rpc/rpc_server.h:41, src/datasystem/common/rpc/zmq/zmq_server_impl.h:51, src/datasystem/common/rpc/zmq/zmq_auth.h:78].
+* *Zero-copy shared memory:* arenas give SDK and worker zero-copy access to the same bytes; sized from `FLAGS_shared_memory_size_mb` [src/datasystem/common/shared_memory/arena.h:71, src/datasystem/worker/worker_oc_server.cpp:910].
+* *Fast transport:* optional layer abstracting URMA (UB) and UCP (UCX/RDMA) behind a common base, enabled by compile flags [src/datasystem/common/rdma/fast_transport_base.h:50, src/datasystem/common/rdma/fast_transport_manager_wrapper.h:25].
+* *Observability:* spdlog logging with rotation, thread-local UUID trace ids, an access recorder, and a crash-time failure signal handler [src/datasystem/common/log/logging.cpp:36, src/datasystem/common/log/trace.h:55, src/datasystem/common/log/access_recorder.h:36, src/datasystem/common/log/failure_handler.h:30].
+* *Metrics:* counters/gauges/histograms with 1 µs–60 s buckets (p50/p90/p99), exporters with a buffer pool, and a resource collector thread [src/datasystem/common/metrics/metrics.h:33, :81, src/datasystem/common/metrics/metrics_exporter.h:42].
+* *Concurrency:* configurable thread pools (droppable queue), a work-stealing parallel-for, and an epoll-based event loop [src/datasystem/common/util/thread_pool.h:50, src/datasystem/common/parallel/parallel_for.h:34, src/datasystem/common/eventloop/event_loop.h:41].
+* *Security:* TLS cert-phrase management, AK/SK HMAC authentication, client access tokens with renewal jitter, and ZMQ CURVE transport auth [src/datasystem/common/encrypt/phrase_pem_tls.h:28, src/datasystem/common/ak_sk/ak_sk_manager.h:50, src/datasystem/common/token/client_access_token.h:42, src/datasystem/common/rpc/zmq/zmq_auth.h:78].
+
+== Architecture Decisions
+
+The significant decisions are recorded as ADRs under `docs/specs/adrs/`:
+
+* `yuanrong-datasystem-adr-001` — Co-host the master role in the worker binary, elected via ETCD CAS.
+* `yuanrong-datasystem-adr-002` — Use a custom ZeroMQ RPC framework instead of the linked gRPC for service traffic.
+* `yuanrong-datasystem-adr-003` — Maintain both external ETCD and a built-in Metastore as coordination backends.
+
+As-built decisions are visible in code; the *rationale* is team-supplied (see ADRs).
+Decisions are recorded mainly in module `design.md` files under `.repo_context/` and
+design docs; there is no dedicated external ADR store yet (team answer).
+
+== Quality Requirements
+
+*Priority ranking (team answer):* correctness > availability > latency. During
+failover, availability outranks latency; the ordering is fixed, not per-use-case.
+
+=== Quality scenarios
+
+[cols="1,2,1"]
+|===
+| Characteristic | Scenario | Target / evidence
+
+| Performance efficiency | Payloads above 100 MB take the zero-copy path; ZMQ traffic chunked at 1 MB; worker-worker merges aggregate at 2 MB; latency bucketed 1 µs–60 s | single-digit-µs p99 Get, multi-GB/s throughput (team answer) [src/datasystem/common/util/gflag/common_gflag_define.cpp:91, :114, src/datasystem/worker/worker_oc_server.cpp:177, src/datasystem/common/metrics/metrics.h:81]
+| Performance (acceptance) | Perf suites run against a recorded baseline | build fails on >~5–10% p99/throughput regression (team answer) [tests/perf/BUILD.bazel:1]
+| Availability | 60 s node-timeout / 300 s node-dead detection; liveness check flags a worker abnormal on RPC-pool saturation past probe timeout | ≥ 99.9% availability, sub-few-second RTO, near-zero RPO under WRITE_THROUGH (team answer) [src/datasystem/common/util/gflag/common_gflag_define.cpp:105, :89, src/datasystem/worker/worker_liveness_check.cpp:248]
+| Reliability | Replicated/elected metadata, node-timeout failover, slot recovery on restart, selectable write durability | availability outranks latency on failover (team answer) [src/datasystem/master/replica_manager.h:77, :816, src/datasystem/worker/object_cache/slot_recovery/slot_recovery_manager.h:92, include/datasystem/object/object_enum.h:30]
+| Security | AK/SK HMAC, ZMQ CURVE, TLS phrase mgmt exist but are opt-in; default `encrypt_kit` is "plaintext" | trusted-network, single-tenant posture; plaintext acceptable inside the boundary, threat model is internal abuse (team answer) [src/datasystem/common/ak_sk/ak_sk_manager.h:50, src/datasystem/common/rpc/zmq/zmq_auth.h:78, src/datasystem/common/util/gflag/common_gflag_define.cpp:44]
+| Compatibility | One worker serves C++/Python/Java/Go bindings | multi-language interop is a designed quality [src/datasystem/pybind_api/pybind_register.cpp:39, src/datasystem/c_api/kv_client_c_wrapper.h:57, example/go/kv_client_example.go:1]
+| Maintainability | Enforced static analysis/formatting, `-Werror`, extensive test tree, checked-in `.repo_context/` | asserted by the test tree and tooling [.clang-tidy:1, tests/CMakeLists.txt:1]
+| Portability | Linux/x86-64 narrow at OS level; broad at accelerator level via compile-time NPU/GPU/URMA/UCX | [README_EN.md:97-99, CMakeLists.txt:122, src/datasystem/common/rdma/fast_transport_manager_wrapper.h:25]
+| Functional suitability | Four API families exercised by unit + system suites | asserted by suites [tests/ut/BUILD.bazel:1, tests/st/BUILD.bazel:1]
+|===
+
+*Scale envelope (team answer):* validated to hundreds of nodes per cluster, millions
+of keys per master, and a few GB of metadata per worker; beyond that, scaling risk is
+real and untested.
+
+== Technical Risks and Technical Debt
+
+Visible debt markers: unfilled build-time version metadata (`GIT_HASH`/`GIT_BRANCH`
+"NO GIT_HASH FIXME") and several deprecated-but-present gflags
+[src/datasystem/common/util/version.h:33, src/datasystem/common/util/gflag/common_gflag_define.cpp:57, :69, :115].
+
+Team disposition (team answer): debt is tracked in the GitCode/Gitee issue tracker
+plus `.repo_context/roadmap.md`. Deprecated gflags are intentional back-compat; the
+FIXME version placeholders are forgotten stragglers.
+
+Risk surface:
+
+* *Security (insecure-by-default):* transport encryption and ZMQ CURVE auth are off unless configured, so a misconfigured deployment transmits cache data in plaintext [src/datasystem/common/util/gflag/common_gflag_define.cpp:44, :38]. Accepted within the trusted-network, single-tenant threat model (team answer).
+* *Operational:* hard external-ETCD dependency (single coordination point if under-provisioned) and a 300 s node-dead window; RPC thread-pool saturation is a defined failure mode [README_EN.md:74, src/datasystem/common/util/gflag/common_gflag_define.cpp:89, src/datasystem/worker/worker_liveness_check.cpp:248]. No in-repo on-call runbook; runbooks/alerts/escalation live in the ops team's internal wiki (team answer).
+* *Dependency / supply-chain:* broad native dependency stack vendored/fetched via CMake/Bazel [cmake/dependency.cmake:5-24, Third_Party_Open_Source_Software_Notice:1]. Versions are pinned via Bazel/WORKSPACE and the third-party notice manifest; CVE scanning runs in CI, defined in build/release tooling (team answer).
+* *Scaling / performance:* master metadata in in-memory concurrent hash maps (per-master memory ceiling), 300-object migration batches, and a fixed virtual-token count bounding balance granularity [src/datasystem/master/object_cache/oc_metadata_manager.h:227, src/datasystem/master/object_cache/oc_migrate_metadata_manager.cpp, src/datasystem/worker/hash_ring/hash_ring_allocator.h:173]. Real beyond the validated envelope above (team answer).
+
+== Glossary
+
+[cols="1,3"]
+|===
+| Term | Definition
+
+| DsClient / SDK | Client library linked into user processes [include/datasystem/datasystem.h:33].
+| Worker | Per-node runtime process serving SDK requests [src/datasystem/worker/worker.cpp:245].
+| Master | Elected role owning metadata/coordination, co-hosted in a worker [src/datasystem/master/master_service_impl.h:51].
+| ETCD | External coordination service (membership, leases, hash ring) [README_EN.md:74].
+| Metastore | Built-in coordination backend alternative to ETCD [src/datasystem/common/kvstore/metastore/metastore_server.h:39].
+| Hash ring | Consistent-hash ring of virtual tokens for metadata sharding [src/datasystem/worker/hash_ring/hash_ring.h:57].
+| WriteMode | Per-write durability selector (NONE/WRITE_THROUGH/WRITE_BACK/*_EVICT) [include/datasystem/object/object_enum.h:30].
+| ConsistencyType | PRAM (=0) or CAUSAL (=1) [include/datasystem/object/object_enum.h:38].
+| Slot / L2 storage | Versioned on-disk unit on a selectable backend (NONE/OBS/SFS/DISTRIBUTED_DISK) [src/datasystem/common/l2cache/l2_storage.h:31].
+| Hetero | Optional NPU/GPU device-memory path [CMakeLists.txt:122].
+|===
+
+Additional terms are defined in the repo glossary [.repo_context/glossary.md:1].

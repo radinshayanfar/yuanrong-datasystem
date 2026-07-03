@@ -1,0 +1,263 @@
+= Specification — openYuanrong DataSystem
+:doctype: book
+:toc: left
+:sectnums:
+
+// Synthesized by Socratic Code-Theory Recovery, Phase 2, from the Q2 branch of the
+// answered Question Tree. Persona use cases are in Cockburn Fully Dressed format at
+// User Goal level; system use cases cover each technical interface. Code-derived
+// claims cite [file:line]; team-supplied facts are marked (team answer).
+
+== Actors
+
+[cols="1,3"]
+|===
+| Actor | Role
+
+| SDK application process | Constructs a client with `ConnectOptions{host,port}` and issues data operations to its local worker [src/datasystem/client/datasystem.cpp:26, include/datasystem/utils/connection.h:27].
+| Worker process | Per-node runtime that serves SDK requests and peers with other workers for cross-node data movement and replication [src/datasystem/worker/worker.cpp:245, src/datasystem/worker/worker_oc_server.h:569].
+| Master role | One elected node owning metadata/coordination; co-hosted in a worker, not a separate binary — selected when `etcdCM_->IsCurrentNodeMaster()` is true [src/datasystem/worker/worker_oc_server.cpp:676, src/datasystem/master/master_service_impl.h:51].
+| ETCD | External coordination service for membership, leases, and the `/datasystem/ring` hash-ring topology [README_EN.md:74, src/datasystem/common/kvstore/etcd/etcd_store.h:141].
+|===
+
+== Persona Use Cases (Cockburn, User Goal level)
+
+=== UC-1: Cache a key/value and read it back
+
+* *Primary Actor:* SDK application process (application developer).
+* *Scope:* DataSystem cluster (SDK + local worker).
+* *Level:* User Goal.
+* *Trigger:* Application calls `KVClient::Set(key, val, SetParam)`, later `Get(key, val)` and `Del(key)` [include/datasystem/kv_client.h:114, :238, :334].
+* *Stakeholders & Interests:*
+** Application developer — wants fast, correct storage and retrieval of a value.
+** Operator — wants the write durability and consistency mode honored.
+* *Preconditions:* Client connected to a running local worker; cluster has an elected master.
+* *Main Success Scenario:*
+. Application calls `Set(key, val, SetParam)` with a `WriteMode`, `ttlSecond`,
+  `existence`, and `cacheType` [include/datasystem/kv_client.h:48].
+. Value is written into shared memory under the given `WriteMode` [src/datasystem/worker/object_cache/worker_oc_service_impl.h:195].
+. Worker persists/replicates per the selected reliability mode.
+. Application calls `Get(key, val)`; worker returns the bytes.
+. Application calls `Del(key)`, ending the key's lifecycle.
+* *Extensions:*
+** 1a. `ttlSecond` elapses before read: on TTL expiry the key becomes eviction-eligible
+   (logically dead), not hard-deleted; a subsequent `Get` misses silently with a
+   not-found status rather than erroring (team answer).
+** 4a. Key absent or expired: `Get` returns NOT_FOUND (terminal, not retryable)
+   (team answer).
+* *Postconditions:*
+** Success: value is readable at the given key until TTL expiry, eviction, or `Del`.
+** TTL expiry: key is eviction-eligible and reads miss silently (team answer).
+* *Business Rules:* BR-1 (reference-count lifecycle), BR-2 (write reliability),
+  BR-3 (consistency model) below.
+
+=== UC-2: Share a reference-counted object
+
+* *Primary Actor:* SDK application process (producer, then consumers).
+* *Level:* User Goal.
+* *Trigger:* Producer increments a global ref, `Create`s a buffer, `MemoryCopy`s data,
+  and `Publish`es; consumers `Get`, then decrease the ref
+  [include/datasystem/object_client.h:84, :130, include/datasystem/object/buffer.h:79, include/datasystem/object_client.h:158].
+* *Stakeholders & Interests:*
+** Producer — wants zero-copy publication of a large object.
+** Consumers — want shared read access without copying.
+** Master — wants the global reference count to be authoritative so the object is
+   purged exactly when unused.
+* *Preconditions:* Producer connected; master tracks object metadata.
+* *Main Success Scenario:*
+. Producer calls `GIncreaseRef`, then `Create` to obtain a shared-memory `Buffer`.
+. Producer fills the buffer via `MemoryCopy` / `MutableData` [include/datasystem/object/buffer.h:67, :116].
+. Producer `Publish`es the object; master records global app-ref counts
+  [src/datasystem/master/object_cache/oc_metadata_manager.h:749].
+. Consumers `Get` the object from shared memory (zero-copy).
+. Each consumer decreases the ref when done; when the count reaches zero the object is
+  purged cluster-wide via `GDecreaseRef` [src/datasystem/master/object_cache/oc_metadata_manager.h:842].
+* *Postconditions:* Object lives in shared memory while its global reference count is
+  > 0; reaching zero deletes it across the cluster (BR-1).
+* *Business Rules:* BR-1.
+
+=== UC-3: Stream producer/consumer (pub-sub)
+
+* *Primary Actor:* SDK application process (producer and consumer).
+* *Level:* User Goal.
+* *Trigger:* Producer `CreateProducer` then `Send(Element)`; consumer `Subscribe(config)`
+  then `Receive(expectNum, timeoutMs, out)`
+  [include/datasystem/stream_client.h:80, include/datasystem/stream/producer.h:59, include/datasystem/stream_client.h:97, include/datasystem/stream/consumer.h:59].
+* *Stakeholders & Interests:*
+** Producer — wants to publish elements without unbounded memory growth.
+** Consumer — wants ordered delivery even when it lags.
+* *Preconditions:* Producer and at least one subscribed consumer on the stream.
+* *Main Success Scenario:*
+. Producer `CreateProducer`.
+. Consumer `Subscribe(SubscriptionConfig)` with `cacheCapacity` / `cachePrefetchLWM`
+  [include/datasystem/stream/stream_config.h:44].
+. Producer `Send`s `Element{ptr, size, id}` values [include/datasystem/stream/element.h:34].
+. Consumer `Receive`s up to `expectNum` elements within `timeoutMs`.
+* *Extensions:*
+** 3a. Slow consumer fills `cacheCapacity`: the intended contract is that the producer
+   *blocks* (flow-control back-pressure) rather than dropping silently; an explicit
+   error is returned only when a bounded timeout is exceeded (team answer).
+* *Postconditions:* Elements are delivered to consumers in order, subject to
+  back-pressure when the cache is full.
+* *Business Rules:* Stream back-pressure contract (Extension 3a).
+
+=== UC-4: Transfer a device (HBM) object
+
+* *Primary Actor:* SDK application process (developer using accelerators).
+* *Level:* User Goal.
+* *Trigger:* Application caches device blobs (`DevMSet` / `DevMGet`) and moves data
+  between host and device (`MGetH2D` / `MSetD2H`) using `DeviceBlobList`
+  [include/datasystem/hetero_client.h:165, :153, :72, :83].
+* *Preconditions:* Build compiled with `BUILD_HETERO` (and `USE_NPU`/`USE_GPU`);
+  otherwise this use case is absent from the shipped binary [CMakeLists.txt:122-128].
+* *Main Success Scenario:*
+. Application constructs a `DeviceBlobList{blobs, deviceIdx, srcOffset}` [include/datasystem/hetero/device_common.h:35].
+. Application caches device blobs via `DevMSet` / reads via `DevMGet`.
+. Application moves data host↔device via `MGetH2D` / `MSetD2H`.
+* *Postconditions:* Device blobs are cached and movable across the host/device boundary.
+* *Business Rules:* Availability of this use case is compile-time gated (team scope).
+
+=== UC-5: Deploy / tear down a cluster
+
+* *Primary Actor:* Cluster operator.
+* *Level:* User Goal.
+* *Trigger:* Operator runs `dscli start -w --worker_address ... --etcd_address ...` /
+  `dscli stop`, or `dscli generate_helm_chart` for Kubernetes
+  [cli/start.py:1, cli/stop.py:1, cli/generate_helm_chart.py:1, README_EN.md:153].
+* *Main Success Scenario:*
+. Operator invokes `dscli start` with worker and ETCD addresses.
+. Workers register to the shared ETCD; a master is elected.
+. For Kubernetes, the operator generates a Helm chart and deploys workers as a
+  per-node DaemonSet.
+. Operator invokes `dscli stop` to tear down.
+* *Postconditions:* A worker runs per node, registered to a shared ETCD.
+
+== System Use Cases (per technical interface)
+
+=== SUC-1: Worker Object-Cache RPC service
+
+* *Operations:* `Create`, `Publish`, `Get` (bidirectional streaming),
+  `DecreaseReference`, `DeleteAllCopy`
+  [src/datasystem/worker/object_cache/worker_oc_service_impl.h:195, :259, :276, :284, :345].
+* *Processing:* `Get` resolves object location via master `QueryMeta`, then streams the
+  payload; payloads above the 100 MB no-copy threshold take the zero-copy path
+  [src/datasystem/master/object_cache/oc_metadata_manager.h:384, src/datasystem/common/util/gflag/common_gflag_define.cpp:91].
+* *Output + status codes:* Each handler can return `OK`, `NOT_FOUND`, `OUT_OF_MEMORY`,
+  `ALREADY_EXISTS`, and `TIMEOUT`/`UNAVAILABLE` (team answer).
+* *Error responses / retry semantics:* transient `TIMEOUT`/`UNAVAILABLE` are retryable;
+  `NOT_FOUND`, `ALREADY_EXISTS`, and `OUT_OF_MEMORY` are terminal and must not be
+  retried (team answer). The underlying Status taxonomy lives in
+  [include/datasystem/utils/status.h, src/datasystem/c_api/status_definition.h].
+
+=== SUC-2: Worker Stream-Cache RPC service
+
+* *Operations:* `CreateProducer`, `CloseProducer`, `Subscribe`, `CloseConsumer`,
+  `CreateShmPage` (zero-copy shared page allocation), all bidirectional streaming
+  [src/datasystem/worker/stream_cache/client_worker_sc_service_impl.h:218, :226, :234, :241, :249].
+* *Back-pressure contract:* producer blocks when `cacheCapacity` is full; explicit
+  error only on bounded-timeout expiry (team answer).
+
+=== SUC-3: Master coordination RPC service
+
+* *Operations:* worker `Heartbeat`, object metadata `CreateMeta` / `QueryMeta`, and
+  replication `TryPSync` / `PushNewLogs`
+  [src/datasystem/master/master_service_impl.h:51, src/datasystem/master/object_cache/oc_metadata_manager.h:283, :384, src/datasystem/master/replication_service_impl.h:45, :54].
+* *Processing:* metadata is held in concurrent hash tables mapping keys to locations,
+  subscriptions, request ids, and remote client refs
+  [src/datasystem/master/object_cache/oc_metadata_manager.h:222, :227].
+
+=== SUC-4: Worker-to-worker data transport
+
+* *Operation:* `WorkerWorkerTransportServiceImpl` moves object data between workers
+  [src/datasystem/worker/worker_oc_server.cpp:558].
+* *Transport:* current release uses TCP; direct worker-worker TCP ports default to 0
+  (disabled); RDMA/UB is compile-time optional ("coming soon")
+  [src/datasystem/common/util/gflag/common_gflag_define.cpp:117, README_EN.md:81].
+
+== Supplementary Specifications
+
+=== Entity Model
+
+[cols="1,3"]
+|===
+| Entity | Definition
+
+| User data types | Mutable shared-memory `Buffer`, `ReadOnlyBuffer` for KV reads, stream `Element{ptr,size,id}`, device `Blob`/`DeviceBlobList{blobs,deviceIdx,srcOffset}` [include/datasystem/object/buffer.h:48, include/datasystem/kv/read_only_buffer.h:32, include/datasystem/stream/element.h:34, include/datasystem/hetero/device_common.h:30].
+| Object-location metadata | Master-side concurrent hash tables (`TbbMetaTable`, `TbbSubMetaTable`, `TbbReqIdTable`, `TbbRemoteClientIdRefTable`) mapping keys to locations, subscriptions, request ids, remote client refs [src/datasystem/master/object_cache/oc_metadata_manager.h:222, :227].
+| Cluster topology | Consistent-hash ring of virtual tokens per worker plus per-node `NodeState` descriptors (RUNNING/TIMEOUT/OFFLINE/NEEDSREP/RESET/UNKNOWN) [src/datasystem/worker/hash_ring/hash_ring.h:130, src/datasystem/master/node_descriptor.h:34].
+| On-disk slot | Versioned slots on a selectable L2 backend (NONE/OBS/SFS/DISTRIBUTED_DISK) [src/datasystem/common/l2cache/slot_client/slot_client.h:79, src/datasystem/common/l2cache/l2_storage.h:31].
+|===
+
+=== State Machines
+
+*Node lifecycle (master's view):* `NodeState` transitions RUNNING → TIMEOUT (at
+`node_timeout_s`, 60 s) → OFFLINE (at `node_dead_timeout_s`, 300 s), with NEEDSREP /
+RESET / UNKNOWN as recovery/unknown states
+[src/datasystem/master/node_descriptor.h:34, :51, :57, src/datasystem/common/util/gflag/common_gflag_define.cpp:105, :89].
+
+*Object lifecycle:* Created → Published → (referenced by N consumers) → purged when the
+global reference count reaches zero [src/datasystem/master/object_cache/oc_metadata_manager.h:842].
+
+=== Interface Contracts / Validation Rules
+
+* *Write reliability (BR-2):* durability is a per-write rule selected by `WriteMode`
+  (NONE / WRITE_THROUGH / WRITE_BACK / *_EVICT) [include/datasystem/object/object_enum.h:30, src/datasystem/common/l2cache/persistence_api.h:55].
+* *Consistency (BR-3):* reads/writes obey a selectable model, PRAM (=0) or CAUSAL (=1)
+  [include/datasystem/object/object_enum.h:38]. PRAM is the recommended default — the
+  cheapest per-writer-order guarantee sufficient for KVCache; CAUSAL is recommended
+  where cross-writer dependencies matter (e.g. coordinated checkpoint/state), trading
+  latency for stronger ordering (team answer).
+* *Reference-count lifecycle (BR-1):* object lifetime is governed by a global reference
+  count; reaching zero deletes the object across the cluster [include/datasystem/object_client.h:84, src/datasystem/master/object_cache/oc_metadata_manager.h:842].
+
+=== Acceptance Criteria
+
+Executable acceptance is encoded as unit tests (`tests/ut`), system tests (`tests/st`,
+including cluster/DFX scenarios), Python API tests (`tests/python`), and perf tests
+(`tests/perf`), gated by `WITH_TESTS`
+[tests/ut/BUILD.bazel:1, tests/st/BUILD.bazel:1, tests/python/test_ds_client.py:1, tests/perf/BUILD.bazel:1, CMakeLists.txt:162].
+
+Performance acceptance threshold (team answer): a build should fail on a >~5–10% p99
+latency or throughput regression versus the recorded baseline; below that is treated
+as noise.
+
+[source,gherkin]
+----
+Feature: KV cache set/get lifecycle
+
+  Scenario: Read back a stored value
+    Given a client connected to a running local worker
+    When the application Sets key "k" to value "v"
+    And the application Gets key "k"
+    Then the returned value is "v"
+
+  Scenario: Read after TTL expiry misses silently
+    Given key "k" was Set with ttlSecond = 1
+    When 2 seconds elapse
+    And the application Gets key "k"
+    Then the result is a NOT_FOUND miss, not an error   # (team answer)
+
+Feature: Reference-counted object lifecycle
+
+  Scenario: Object purged when last reference is released
+    Given a producer Published object "o"
+    And two consumers each hold a reference
+    When both consumers DecreaseReference on "o"
+    Then object "o" is purged cluster-wide
+
+Feature: Stream back-pressure
+
+  Scenario: Producer blocks when the consumer cache is full   # (team answer)
+    Given a consumer Subscribed with a bounded cacheCapacity
+    And the consumer is not Receiving
+    When the producer Sends until cacheCapacity is full
+    Then the producer blocks rather than dropping elements
+    And an error is returned only if a bounded timeout is exceeded
+
+Feature: Performance regression gate
+
+  Scenario: Fail the build on significant regression   # (team answer)
+    Given a recorded perf baseline
+    When a change regresses p99 latency or throughput by more than ~5-10%
+    Then the build fails
+----

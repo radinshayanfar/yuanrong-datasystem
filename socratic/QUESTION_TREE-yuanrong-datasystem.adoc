@@ -1,0 +1,696 @@
+= Question Tree — yuanrong-datasystem
+:doctype: book
+
+// Socratic Code-Theory Recovery, Phase 1.
+// Bounded context: the entire yuanrong-datasystem repository, treated as one context.
+// Root: /home/runner/work/yuanrong-datasystem/yuanrong-datasystem/target
+// Evidence paths are relative to that root.
+// Fixed second level (Q1.1–Q5.5) is emitted in full; depth below it is code-driven.
+
+== Q1: What problem does this bounded context solve, and for whom?
+
+=== Q1.1: Product identity — what is this bounded context?
+[ANSWERED]
+Evidence: README_EN.md:34, include/datasystem/datasystem.h:33, src/datasystem/worker/worker_main.cpp:52
+openYuanrong DataSystem is a distributed multi-level (DRAM/SSD, plus device HBM)
+caching system for compute clusters. It ships as an SDK (`DsClient`) linked into
+user processes and a per-node `datasystem_worker` runtime process; the two halves
+are the poles of the same context.
+
+=== Q1.2: Who are the primary users?
+==== Q1.2.1: What API personas does the code expose to application developers?
+[ANSWERED]
+Evidence: include/datasystem/kv_client.h:75, include/datasystem/object_client.h:53, include/datasystem/stream_client.h:42, include/datasystem/hetero_client.h:45
+Application developers integrate one of four client families: `KVClient`
+(key/value), `ObjectClient` (reference-counted shared-memory objects),
+`StreamClient` (producer/consumer pub-sub), and `HeteroClient` (NPU/GPU device
+memory). These are the direct in-process users of the context.
+
+==== Q1.2.2: What operator/deployer persona does the code expose?
+[ANSWERED]
+Evidence: cli/command.py:1, cli/start.py:1, cli/stop.py:1, README_EN.md:153
+A cluster operator drives deployment through the `dscli` CLI (`start`, `stop`,
+`up`, `down`, `generate_helm_chart`), targeting worker + ETCD topology.
+
+==== Q1.2.3: Which end-user market segments are these APIs actually built for?
+[OPEN]
+Category: business-context
+Ask role: Product Owner, Domain Expert
+README_EN.md:47-53 lists target scenarios (LLM KVCache, M→N elasticity, RL
+parameter rearrangement, checkpoint, microservice state), but the code cannot
+reveal which segment is the primary customer today versus aspirational. Needed to
+rank Q1.6 segment priority and structure Q2 use cases.
+
+=== Q1.3: Through what channels is the product delivered/consumed?
+[ANSWERED]
+Evidence: python/yr/datasystem/ds_client.py:26, src/datasystem/pybind_api/pybind_register.cpp:39, src/datasystem/c_api/kv_client_c_wrapper.h:57, src/datasystem/java_api/kv/org_yuanrong_datasystem_kv_KVClient.cpp:37, setup.py:259
+Channels: native C++ headers (include/datasystem), a Python SDK via pybind11
+(`libds_client_py`), a C API bridge (used by Go), and a JNI Java binding. Packaged
+and distributed as the PyPI wheel `openyuanrong-datasystem` (Python >=3.9) plus
+Helm charts for Kubernetes.
+
+=== Q1.4: Why was this bounded context built — what motivated it?
+[OPEN]
+Category: business-context
+Ask role: Product Owner, Architect
+The code shows a KVCache/object/stream cache but not the originating motivation.
+Was DataSystem extracted to accelerate a specific in-house LLM-inference product,
+to replace an external cache (Redis/Alluxio), or as a general openYuanrong
+platform component? Affects how Q3.4 (Solution Strategy) rationale is framed.
+
+=== Q1.5: What success metrics define "working well"?
+[OPEN]
+Category: quality-goals
+Ask role: Product Owner, Architect
+The repo instruments throughput/latency metrics (src/datasystem/common/metrics/metrics.h:81
+histogram buckets 1us–60s) and ships benchmarks (dsbench, tests/perf), but the code
+does not state the target SLOs (e.g. p99 Get latency, target throughput, cache hit
+ratio) that constitute success. Needed for Q4 quality targets and Q3.10.
+
+=== Q1.6: Which user/scenario segment has priority?
+[OPEN]
+Category: business-context
+Ask role: Product Owner
+Multiple scenarios are supported (README_EN.md:47-53) and heterogeneous/NPU paths
+are compile-time optional (CMakeLists.txt:122-133), suggesting KVCache-for-inference
+may be first among equals, but priority is not derivable from code. Needed to order
+the Q2 use-case catalog.
+
+== Q2: What is the specification of this bounded context?
+
+=== Q2.1: Who/what are the actors?
+==== Q2.1.1: SDK application process (primary human-driven actor)
+[ANSWERED]
+Evidence: src/datasystem/client/datasystem.cpp:26, include/datasystem/utils/connection.h:27
+An application process constructs a client with `ConnectOptions{host,port}` and
+issues data operations to its local worker.
+
+==== Q2.1.2: Worker process (system actor / peer)
+[ANSWERED]
+Evidence: src/datasystem/worker/worker.cpp:245, src/datasystem/worker/worker_oc_server.h:569
+Each node runs a worker that serves SDK requests and acts as a peer to other
+workers for cross-node data movement and replication.
+
+==== Q2.1.3: Master role (system actor, co-hosted in a worker)
+[ANSWERED]
+Evidence: src/datasystem/worker/worker_oc_server.cpp:676, src/datasystem/master/master_service_impl.h:51
+One node is elected master; it owns metadata/coordination. It is not a separate
+binary — `WorkerOCServer::InitializeAllServices` branches to master services when
+`etcdCM_->IsCurrentNodeMaster()` is true.
+
+==== Q2.1.4: ETCD (external coordination actor)
+[ANSWERED]
+Evidence: README_EN.md:74, src/datasystem/common/kvstore/etcd/etcd_store.h:141, src/datasystem/common/kvstore/etcd/etcd_constants.h:39
+An external ETCD cluster is a mandatory actor for membership, leases, and
+hash-ring topology (`/datasystem/ring`).
+
+=== Q2.2: Use-case catalog
+==== Q2.2.PUC.KvSetGet: Persona use case — cache a key/value and read it back
+===== Q2.2.PUC.KvSetGet.Trigger
+[ANSWERED]
+Evidence: include/datasystem/kv_client.h:114 (Set), include/datasystem/kv_client.h:238 (Get), include/datasystem/kv_client.h:334 (Del)
+Application calls `KVClient::Set(key,val,SetParam)`, later `Get(key,val)` and
+`Del(key)`.
+===== Q2.2.PUC.KvSetGet.MainSuccess
+[ANSWERED]
+Evidence: include/datasystem/kv_client.h:48 (SetParam: writeMode, ttlSecond, existence, cacheType), src/datasystem/worker/object_cache/worker_oc_service_impl.h:195
+Value is written into shared memory under the given `WriteMode`/`ttlSecond`;
+worker persists/replicates per reliability mode; Get returns the bytes; Del ends
+lifecycle.
+===== Q2.2.PUC.KvSetGet.TtlSemantics
+[OPEN]
+Category: business-context
+Ask role: Product Owner, Domain Expert
+`SetParam.ttlSecond` exists (kv_client.h:48) but the intended contract on expiry
+(hard delete vs. eligible-for-eviction, whether reads after TTL fail or miss
+silently) is a product rule, not fully determinable from the flag alone.
+
+==== Q2.2.PUC.ObjectRefCounted: Persona use case — reference-counted object sharing
+===== Q2.2.PUC.ObjectRefCounted.Trigger
+[ANSWERED]
+Evidence: include/datasystem/object_client.h:84 (GIncreaseRef), include/datasystem/object_client.h:130 (Create), include/datasystem/object/buffer.h:79 (Publish), include/datasystem/object_client.h:158 (Get)
+Producer increments a global ref, `Create`s a buffer, `MemoryCopy`s data, and
+`Publish`es; consumers `Get` and later decrease the ref, at which point lifecycle
+ends.
+===== Q2.2.PUC.ObjectRefCounted.MainSuccess
+[ANSWERED]
+Evidence: include/datasystem/object/buffer.h:67 (MemoryCopy), include/datasystem/object/buffer.h:116 (MutableData), src/datasystem/master/object_cache/oc_metadata_manager.h:749 (GIncreaseMasterAppRef), src/datasystem/master/object_cache/oc_metadata_manager.h:842 (GDecreaseRef)
+Object lives in shared memory; master tracks global app-ref counts; when the count
+reaches zero the object is purged (`GDecreaseRef`).
+
+==== Q2.2.PUC.StreamPubSub: Persona use case — stream producer/consumer
+===== Q2.2.PUC.StreamPubSub.Trigger
+[ANSWERED]
+Evidence: include/datasystem/stream_client.h:80 (CreateProducer), include/datasystem/stream/producer.h:59 (Send), include/datasystem/stream_client.h:97 (Subscribe), include/datasystem/stream/consumer.h:59 (Receive)
+Producer `CreateProducer` then `Send(Element)`; consumer `Subscribe(config)` then
+`Receive(expectNum,timeoutMs,out)`.
+===== Q2.2.PUC.StreamPubSub.Backpressure
+[OPEN]
+Category: design-rationale
+Ask role: Architect, Domain Expert
+`SubscriptionConfig` carries `cacheCapacity`/`cachePrefetchLWM`
+(include/datasystem/stream/stream_config.h:44) but the intended producer behavior
+when a slow consumer fills the cache (block, drop, error) is a design contract not
+fully readable from the config struct.
+
+==== Q2.2.PUC.HeteroDeviceTransfer: Persona use case — device (HBM) object transfer
+===== Q2.2.PUC.HeteroDeviceTransfer.Trigger
+[ANSWERED]
+Evidence: include/datasystem/hetero_client.h:165 (DevMSet), include/datasystem/hetero_client.h:153 (DevMGet), include/datasystem/hetero_client.h:72 (MGetH2D), include/datasystem/hetero_client.h:83 (MSetD2H)
+Application caches device blobs (`DevMSet`/`DevMGet`) and moves data between host
+and device (`MGetH2D`/`MSetD2H`) using `DeviceBlobList`.
+===== Q2.2.PUC.HeteroDeviceTransfer.Availability
+[ANSWERED: not applicable when hetero disabled]
+Evidence: CMakeLists.txt:122 (BUILD_HETERO), CMakeLists.txt:124 (USE_NPU), CMakeLists.txt:128 (USE_GPU)
+The hetero path is compile-time optional; in a build without `BUILD_HETERO` this
+use case is absent from the shipped binary.
+
+==== Q2.2.OPUC.DeployCluster: Operator use case — deploy/tear down a cluster
+[ANSWERED]
+Evidence: cli/start.py:1, cli/stop.py:1, cli/generate_helm_chart.py:1, README_EN.md:153
+Operator runs `dscli start -w --worker_address ... --etcd_address ...` /
+`dscli stop`, or generates a Helm chart for Kubernetes DaemonSet deployment.
+
+=== Q2.3: Per-interface system specifications
+==== Q2.3.SUC.WorkerOcService: worker object-cache RPC surface
+===== Q2.3.SUC.WorkerOcService.Operations
+[ANSWERED]
+Evidence: src/datasystem/worker/object_cache/worker_oc_service_impl.h:195 (Create), :259 (Publish), :276 (Get, streaming), :284 (DecreaseReference), :345 (DeleteAllCopy)
+The client-facing worker OC service exposes Create, Publish, Get (bidirectional
+streaming), DecreaseReference, and DeleteAllCopy handlers.
+===== Q2.3.SUC.WorkerOcService.ErrorContract
+[OPEN]
+Category: design-rationale
+Ask role: Developer
+The Status/error-code taxonomy exists (include/datasystem/utils/status.h,
+src/datasystem/c_api/status_definition.h) but the per-operation error contract
+(which codes each handler can return and their retry semantics) is not enumerated
+in one place; needs developer confirmation to spec.
+
+==== Q2.3.SUC.StreamService: worker stream-cache RPC surface
+[ANSWERED]
+Evidence: src/datasystem/worker/stream_cache/client_worker_sc_service_impl.h:218 (CreateProducer), :226 (CloseProducer), :234 (Subscribe), :241 (CloseConsumer), :249 (CreateShmPage)
+The client-facing stream service exposes CreateProducer, CloseProducer, Subscribe,
+CloseConsumer, and CreateShmPage (zero-copy shared page allocation), all as
+bidirectional streaming RPCs.
+
+==== Q2.3.SUC.MasterService: master coordination RPC surface
+[ANSWERED]
+Evidence: src/datasystem/master/master_service_impl.h:51 (Heartbeat), src/datasystem/master/object_cache/oc_metadata_manager.h:283 (CreateMeta), :384 (QueryMeta), src/datasystem/master/replication_service_impl.h:45 (TryPSync), :54 (PushNewLogs)
+Master exposes worker Heartbeat, object metadata create/query, and replication
+sync/log-push RPCs.
+
+==== Q2.3.SUC.Transport: worker-to-worker data transport
+[ANSWERED]
+Evidence: src/datasystem/worker/worker_oc_server.cpp:558 (WorkerWorkerTransportServiceImpl), README_EN.md:81, src/datasystem/common/util/gflag/common_gflag_define.cpp:117 (oc_worker_worker_direct_port default 0)
+Workers move data over a worker-worker transport service; direct worker-worker TCP
+ports default to 0 (disabled). Current release transports over TCP; RDMA/UB is
+compile-time optional (README states RDMA/UB "coming soon").
+
+=== Q2.4: Data / entity model
+==== Q2.4.1: User-facing value/data types
+[ANSWERED]
+Evidence: include/datasystem/object/buffer.h:48 (Buffer), include/datasystem/kv/read_only_buffer.h:32 (ReadOnlyBuffer), include/datasystem/stream/element.h:34 (Element{ptr,size,id}), include/datasystem/hetero/device_common.h:30 (Blob), :35 (DeviceBlobList{blobs,deviceIdx,srcOffset})
+The user data model is: mutable shared-memory `Buffer`, `ReadOnlyBuffer` for KV
+reads, stream `Element{ptr,size,id}`, and device `Blob`/`DeviceBlobList`.
+==== Q2.4.2: Object-location metadata (master-side entity)
+[ANSWERED]
+Evidence: src/datasystem/master/object_cache/oc_metadata_manager.h:222 (TbbMetaTable, TbbSubMetaTable, TbbReqIdTable, TbbRemoteClientIdRefTable), :227 (tbb::concurrent_hash_map)
+Master keeps object metadata in concurrent hash tables mapping keys to locations,
+subscriptions, request ids, and remote client refs.
+==== Q2.4.3: Cluster-topology entity (hash ring + node descriptor)
+[ANSWERED]
+Evidence: src/datasystem/worker/hash_ring/hash_ring.h:130 (GetPrimaryWorkerUuid), src/datasystem/worker/hash_ring/hash_ring_allocator.h:173 (defaultHashTokenNum), src/datasystem/master/node_descriptor.h:34 (NodeState: RUNNING/TIMEOUT/OFFLINE/NEEDSREP/RESET/UNKNOWN)
+Topology is a consistent-hash ring of virtual tokens per worker plus per-node
+`NodeState` descriptors.
+==== Q2.4.4: On-disk slot entity (secondary storage)
+[ANSWERED]
+Evidence: src/datasystem/common/l2cache/slot_client/slot_client.h:79 (Save, versioned), :102 (GetWithoutVersion), src/datasystem/common/l2cache/l2_storage.h:31 (L2StorageType: NONE/OBS/SFS/DISTRIBUTED_DISK)
+Persistent data is stored as versioned slots on a selectable L2 backend
+(none/OBS/SFS/distributed-disk).
+
+=== Q2.5: Acceptance criteria
+==== Q2.5.1: What executable acceptance suites exist?
+[ANSWERED]
+Evidence: tests/CMakeLists.txt:1, tests/ut/BUILD.bazel:1, tests/st/BUILD.bazel:1, tests/python/test_ds_client.py:1, tests/perf/BUILD.bazel:1
+Acceptance is encoded as unit tests (tests/ut), system tests (tests/st, incl.
+cluster/DFX scenarios), Python API tests (tests/python), and perf tests
+(tests/perf), gated by `WITH_TESTS` (CMakeLists.txt:162).
+==== Q2.5.2: What are the pass/fail acceptance thresholds (esp. performance)?
+[OPEN]
+Category: quality-goals
+Ask role: Architect, Developer
+Perf tests exist but the numeric acceptance bar (what regression fails a build) is
+not encoded as an asserted threshold discoverable in code. Needed to make Q4.2 a
+verifiable acceptance criterion rather than an observation.
+
+=== Q2.6: Cross-cutting business rules
+==== Q2.6.1: Reference-count lifecycle rule
+[ANSWERED]
+Evidence: include/datasystem/object_client.h:84 (GIncreaseRef), src/datasystem/master/object_cache/oc_metadata_manager.h:842 (GDecreaseRef purges on zero)
+Object lifetime is governed by a global reference count; reaching zero deletes the
+object across the cluster.
+==== Q2.6.2: Write-reliability rule
+[ANSWERED]
+Evidence: include/datasystem/object/object_enum.h:30 (WriteMode NONE/WRITE_THROUGH/WRITE_BACK/*_EVICT), src/datasystem/common/l2cache/persistence_api.h:55 (Save takes WriteMode)
+Durability is a per-write rule selected by `WriteMode`: no-L2, synchronous
+write-through, or asynchronous write-back (with evictable variants).
+==== Q2.6.3: Consistency-model rule
+[ANSWERED]
+Evidence: include/datasystem/object/object_enum.h:38 (ConsistencyType PRAM=0, CAUSAL=1)
+Reads/writes obey a selectable consistency model: PRAM or Causal.
+==== Q2.6.4: Which rules are defaults vs. mandatory, and why those defaults?
+[OPEN]
+Category: design-rationale
+Ask role: Architect, Domain Expert
+The enums expose choices but the intended/recommended default per scenario and the
+rationale (e.g. why PRAM=0 is the base case) are design knowledge not in the code.
+
+== Q3: What is the architecture of this bounded context?
+
+=== Q3.1: Introduction and Goals (arc42 ch.1)
+[ANSWERED]
+Evidence: README_EN.md:36 (feature list), CLAUDE.md:3 ("high-performance, highly-available distributed cache")
+Stated top-level goals: high-performance zero-copy multi-level caching,
+efficient inter-NPU transfer, flexible lifecycle management, hot-data replication,
+selectable reliability/consistency, pub-sub, and high availability with horizontal
+metadata scaling. (Ranking of these goals is Q4.9, [OPEN].)
+
+=== Q3.2: Architecture Constraints (arc42 ch.2)
+==== Q3.2.1: Technical constraints
+===== Q3.2.1.Language: C++17 + Python >=3.9
+[ANSWERED]
+Evidence: .bazelrc:1 (-std=c++17), CMakeLists.txt (CMAKE_CXX_STANDARD 17), setup.py:259 (python_requires >=3.9), .bazelrc:69 (CC=gcc, CXX=g++)
+Core is C++17 built with GCC; SDK targets Python >=3.9.
+===== Q3.2.1.NoStdRegex: std::regex banned
+[ANSWERED]
+Evidence: CMakeLists.txt:183-185 (FATAL_ERROR on `#include <regex>`, "use re2")
+The build fails compilation if any source includes `<regex>`; re2 is mandated.
+===== Q3.2.1.MandatedLibs: mandatory third-party stack
+[ANSWERED]
+Evidence: cmake/dependency.cmake:5-24 (absl, re2, zlib, libzmq, rocksdb, protobuf, grpc, etcdapi), src/datasystem/master/object_cache/oc_metadata_manager.h:227 (TBB)
+Non-optional dependencies: Abseil, re2, zlib, ZeroMQ, RocksDB, protobuf, gRPC,
+etcd C API, and Intel TBB.
+===== Q3.2.1.ExternalEtcd: ETCD is a hard runtime dependency
+[ANSWERED]
+Evidence: README_EN.md:74, cmake/dependency.cmake:18 (etcdapi)
+An external ETCD deployment is required for cluster management (a built-in
+Metastore alternative exists — src/datasystem/common/kvstore/metastore/metastore_server.h:39).
+===== Q3.2.1.Platform: Linux/x86-64
+[ANSWERED]
+Evidence: README_EN.md:97-99 (Linux, glibc 2.34+ recommended, x86-64), src/datasystem/common/eventloop/event_loop.h:32 (<sys/epoll.h>), src/datasystem/common/shared_memory/allocator.h:39 (/dev/shm mmap)
+Linux-only (epoll, /dev/shm, POSIX shared memory), x86-64.
+==== Q3.2.2: Organizational / process constraints
+===== Q3.2.2.DualBuild: both Bazel and CMake must work
+[ANSWERED]
+Evidence: build.sh:20 (-b cmake|bazel), WORKSPACE:1, CMakeLists.txt:1
+Two build systems are maintained in parallel; changes must build under both.
+===== Q3.2.2.CI: CI workflows gate merges
+[ANSWERED]
+Evidence: .github/workflows/ (886 tracked files under .github), .gitee/PULL_REQUEST_TEMPLATE/
+CI (GitHub + Gitee mirrors) and a PR template exist and gate contributions.
+===== Q3.2.2.ReviewRules: what are the mandated review/branching rules?
+[OPEN]
+Category: stakeholder-context
+Ask role: Architect, Operations
+CI config and a PR template exist, but the human process (required approvals,
+protected branches, release cadence, who owns merge rights) is not derivable from
+the repository files alone.
+==== Q3.2.3: Conventional constraints
+===== Q3.2.3.Formatting: clang-format / clang-tidy enforced
+[ANSWERED]
+Evidence: .clang-format:1 (Google base, col 120, 4-space indent), .clang-tidy:1 (bugprone-*, performance-*, readability-*, clang-analyzer-*)
+Formatting and static-analysis rules are checked-in and strict (`-Werror` at
+CMakeLists.txt makes warnings fatal).
+===== Q3.2.3.Header: mandatory copyright header
+[ANSWERED]
+Evidence: src/datasystem/master/replica_rpc_channel_impl.cpp:2-14 (Huawei copyright + Apache 2.0 boilerplate), LICENSE:1
+Every source file carries a Huawei copyright + Apache-2.0 header block.
+
+=== Q3.3: System Scope and Context (arc42 ch.3)
+==== Q3.3.1: External interfaces crossing the boundary
+[ANSWERED]
+Evidence: README_EN.md:78-82 (SDK↔worker shared memory; worker↔worker TCP/RDMA; HBM↔HBM HCCS/RoCE; worker↔ETCD)
+Boundary flows: SDK↔worker over shared memory; worker↔worker over TCP (RDMA/UB
+future); device HBM↔HBM over HCCS/RoCE; worker↔ETCD for coordination.
+==== Q3.3.2: Position within the larger openYuanrong product
+[OPEN]
+Category: business-context
+Ask role: Product Owner, Architect
+README_EN.md:28-32 says this is one of three openYuanrong repos (runtime, function
+system, data system). The exact runtime contract/coupling with the other two repos
+is not present in this repository and must come from the platform owners.
+
+=== Q3.4: Solution Strategy (arc42 ch.4)
+[ANSWERED]
+Evidence: src/datasystem/common/shared_memory/allocator.h:39 (zero-copy shm), src/datasystem/worker/hash_ring/hash_ring.h:130 (consistent-hash routing), src/datasystem/master/replica_manager.h:77 (replicated metadata + election), src/datasystem/common/l2cache/l2_storage.h:31 (tiered persistence backends)
+Strategy the code embodies: zero-copy shared memory for the SDK↔worker hot path;
+consistent-hash sharding of metadata across workers; a replicated, elected master
+for metadata HA; and a pluggable tiered L2 persistence layer. (The *why* behind
+these choices is Q3.9, largely [OPEN].)
+
+=== Q3.5: Building Block View (arc42 ch.5)
+==== Q3.5.1: client SDK block
+[ANSWERED]
+Evidence: src/datasystem/client/datasystem.cpp:26, src/datasystem/client/client_worker_common_api.cpp:1, src/datasystem/client/mmap_manager.cpp:1
+`src/datasystem/client` implements the SDK-side clients, worker connection/discovery,
+and the shared-memory mmap manager. Depends on protos + common.
+==== Q3.5.2: worker runtime block
+[ANSWERED]
+Evidence: src/datasystem/worker/worker.h:87 (owns WorkerOCServer), src/datasystem/worker/worker_oc_server.h:569 (owns worker/master OC + SC services), src/datasystem/worker/worker_main.cpp:52
+`src/datasystem/worker` is the node runtime: `Worker` owns a `WorkerOCServer` that
+composes object-cache and stream-cache services (client-facing, worker-worker, and
+master-worker variants).
+==== Q3.5.3: master/coordination block
+[ANSWERED]
+Evidence: src/datasystem/master/master_service_impl.h:51, src/datasystem/master/object_cache/oc_metadata_manager.h:227, src/datasystem/master/replica_manager.h:77, src/datasystem/master/worker_manager.h:159
+`src/datasystem/master` holds metadata management, replica/election management, and
+worker/node/resource managers; instantiated only on the elected master node.
+==== Q3.5.4: RPC / server-assembly block
+[ANSWERED]
+Evidence: src/datasystem/server/common_server.cpp:55 (Init builds RpcServer + SockEventLoop), src/datasystem/common/rpc/rpc_server.h:41 (ZmqServerImpl), src/datasystem/common/rpc/rpc_channel.cpp:26
+`src/datasystem/server` + `src/datasystem/common/rpc` provide the custom RPC layer
+(ZeroMQ transport, endpoint builder, event loop) that all services register onto.
+==== Q3.5.5: shared-memory block
+[ANSWERED]
+Evidence: src/datasystem/common/shared_memory/allocator.h:39 (Allocator singleton), src/datasystem/common/shared_memory/arena.h:49 (ArenaGroup), :71 (AllocateMemory returns ptr/fd/offset/NUMA)
+`src/datasystem/common/shared_memory` pre-allocates /dev/shm arenas and hands out
+zero-copy regions (with NUMA awareness) to OC/SC.
+==== Q3.5.6: L2 cache / secondary storage block
+[ANSWERED]
+Evidence: src/datasystem/common/l2cache/persistence_api.h:32 (PersistenceApi), src/datasystem/common/l2cache/l2_storage.cpp:24 (GetCurrentStorageType reads FLAGS_l2_cache_type), src/datasystem/common/l2cache/slot_client/slot_client.h:53
+`src/datasystem/common/l2cache` abstracts persistence behind `PersistenceApi`,
+selecting a backend from `l2_cache_type`, and implements the distributed-disk slot
+client.
+==== Q3.5.7: cluster/kvstore block (ETCD + Metastore)
+[ANSWERED]
+Evidence: src/datasystem/common/kvstore/kv_store.h:31 (KvStore interface), src/datasystem/common/kvstore/etcd/etcd_store.h:141, src/datasystem/common/kvstore/metastore/metastore_server.h:39, src/datasystem/worker/hash_ring/hash_ring.h:65 (InitWithEtcd), src/datasystem/worker/cluster_manager/etcd_cluster_manager.h:75
+`kvstore` provides a `KvStore` abstraction with ETCD and built-in Metastore
+backends; hash-ring and cluster-manager consume it for topology and membership.
+==== Q3.5.8: language-binding blocks
+[ANSWERED]
+Evidence: src/datasystem/pybind_api/pybind_register.cpp:39, src/datasystem/c_api/kv_client_c_wrapper.h:57, src/datasystem/java_api/kv/org_yuanrong_datasystem_kv_KVClient.cpp:37
+`pybind_api`, `c_api`, and `java_api` wrap the C++ clients for Python, C/Go, and
+Java respectively.
+==== Q3.5.9: transfer_engine block (optional hetero)
+[ANSWERED]
+Evidence: CMakeLists.txt:153-157 (built only if BUILD_TRANSFER_ENGINE AND BUILD_HETERO AND BUILD_HETERO_NPU), transfer_engine/src/transfer_engine.cpp:1
+`transfer_engine/` is a separate NPU-oriented data-transfer subsystem, compiled in
+only for NPU hetero builds.
+
+=== Q3.6: Runtime View (arc42 ch.6)
+==== Q3.6.1: Worker startup sequence
+[ANSWERED]
+Evidence: src/datasystem/worker/worker_main.cpp:52 (Init), src/datasystem/worker/worker.cpp:312 (ParseCommandLineFlags→InitWorker), :245 (create WorkerOCServer, pre-init RocksDB, Init+Start), src/datasystem/server/common_server.cpp:66 (BuildAndStart)
+Startup: parse flags → InitWorker → construct WorkerOCServer (with worker/bind/master
+addresses, pre-init RocksDB) → CommonServer builds+starts the RPC server → main loop
+polls termination with metrics/config ticks (worker_main.cpp:65).
+==== Q3.6.2: Master-vs-worker service election at init
+[ANSWERED]
+Evidence: src/datasystem/worker/worker_oc_server.cpp:676 (InitializeAllServices branches on etcdCM_->IsCurrentNodeMaster()), :534 (CreateMasterServices), src/datasystem/master/replica_manager.cpp:535 (Election via ETCD CAS on /datasystem/replica_group)
+At init each node checks mastership via ETCD; the master runs Master/Replication
+services; election uses ETCD compare-and-swap on the replica group.
+==== Q3.6.3: Object Get request runtime path
+[ANSWERED]
+Evidence: src/datasystem/worker/object_cache/worker_oc_service_impl.h:276 (Get streaming handler), src/datasystem/master/object_cache/oc_metadata_manager.h:384 (QueryMeta returns routing info), src/datasystem/common/util/gflag/common_gflag_define.cpp:91 (payload_nocopy_threshold 100MB)
+A Get resolves object location via master `QueryMeta`, then streams the payload;
+payloads above the 100MB no-copy threshold take the zero-copy path.
+==== Q3.6.4: Membership / heartbeat runtime loop
+[ANSWERED]
+Evidence: src/datasystem/master/master_service_impl.cpp:46 (Heartbeat), src/datasystem/master/node_descriptor.h:51 (EvaluateTimeout at node_timeout_s), :57 (AssumeDead at node_dead_timeout_s), src/datasystem/common/kvstore/etcd/etcd_store.h:536 (RunKeepAliveTask renews lease)
+Workers heartbeat the master; nodes transition TIMEOUT at `node_timeout_s` (60s) and
+OFFLINE at `node_dead_timeout_s` (300s); ETCD leases are renewed by a keepalive task.
+==== Q3.6.5: Failover / recovery runtime path
+[ANSWERED]
+Evidence: src/datasystem/master/replica_manager.cpp:816 (HandleNodeTimeout: fail tasks→switch backup to primary), src/datasystem/master/object_cache/oc_metadata_manager.h:480 (ProcessWorkerTimeout reselects primary copy), :496 (ProcessWorkerRestart reconciles), src/datasystem/worker/object_cache/slot_recovery/slot_recovery_manager.h:92 (BuildInitialTasks)
+On node timeout: replica manager promotes a backup to primary, metadata reselects
+primary copies, restarted workers reconcile metadata, and distributed-disk slots are
+recovered via round-robin recovery tasks.
+==== Q3.6.6: Scale-up / scale-down runtime path
+[ANSWERED]
+Evidence: src/datasystem/worker/hash_ring/hash_ring.cpp:603 (AddNode assigns defaultHashTokenNum vnodes), src/datasystem/worker/cluster_manager/etcd_cluster_manager.h:107 (CheckWorkerIsScaleDown), src/datasystem/master/object_cache/oc_migrate_metadata_manager.cpp:1 (OBJECT_BATCH=300 migration)
+Adding a node inserts virtual tokens into the ring; voluntary scale-down is flagged
+via cluster manager and drives metadata migration in batches of 300 objects.
+
+=== Q3.7: Deployment View (arc42 ch.7)
+[ANSWERED]
+Evidence: README_EN.md:72-76, src/datasystem/worker/worker_flags.cpp:25 (worker_address default 127.0.0.1:31501), cli/generate_helm_chart.py:1, k8s_deployment/ (DaemonSet assets)
+Deployment: one worker process per node (default listen 127.0.0.1:31501) registered
+to a shared ETCD; SDK linked into each user process talks to the local worker.
+Kubernetes deployment is a per-node DaemonSet via Helm.
+
+=== Q3.8: Cross-cutting Concepts (arc42 ch.8)
+==== Q3.8.1: Custom RPC over ZeroMQ
+[ANSWERED]
+Evidence: src/datasystem/common/rpc/rpc_server.h:41 (ZmqServerImpl), src/datasystem/common/rpc/zmq/zmq_server_impl.h:51 (IOService TCP/UDS decode/encode), src/datasystem/common/rpc/zmq/zmq_auth.h:78 (CURVE auth)
+All service RPC is a custom framework over ZeroMQ sockets (TCP or Unix-domain),
+with optional CURVE authentication.
+==== Q3.8.2: Zero-copy shared memory
+[ANSWERED]
+Evidence: src/datasystem/common/shared_memory/arena.h:71 (AllocateMemory), src/datasystem/worker/worker_oc_server.cpp:910 (Init sizes shm from FLAGS_shared_memory_size_mb)
+Shared-memory arenas give SDK and worker zero-copy access to the same bytes.
+==== Q3.8.3: Fast transport (RDMA / URMA / UCP)
+[ANSWERED]
+Evidence: src/datasystem/common/rdma/fast_transport_base.h:50 (IsUrmaEnabled/IsUcpEnabled/IsRemoteH2DEnabled), src/datasystem/common/rdma/fast_transport_manager_wrapper.h:25 (#ifdef USE_URMA/USE_RDMA)
+An optional fast-transport layer abstracts URMA (UB) and UCP (UCX/RDMA) behind a
+common base; enabled by compile flags.
+==== Q3.8.4: Logging, tracing, access records
+[ANSWERED]
+Evidence: src/datasystem/common/log/logging.cpp:36 (spdlog), src/datasystem/common/log/trace.h:55 (thread-local Trace, UUID trace ids), src/datasystem/common/log/access_recorder.h:36, src/datasystem/common/log/failure_handler.h:30 (crash signal handler)
+Cross-cutting observability: spdlog-based logging with rotation, thread-local UUID
+trace ids, an access recorder, and a crash-time failure signal handler.
+==== Q3.8.5: Metrics
+[ANSWERED]
+Evidence: src/datasystem/common/metrics/metrics.h:33 (Counter/Gauge/Histogram), :81 (buckets 1us–60s, p50/p90/p99), src/datasystem/common/metrics/metrics_exporter.h:42, src/datasystem/common/metrics/res_metric_collector.h:48
+A metrics subsystem (counters/gauges/histograms with 1us–60s buckets), exporters
+with a buffer pool, and a resource collector thread.
+==== Q3.8.6: Concurrency primitives
+[ANSWERED]
+Evidence: src/datasystem/common/util/thread_pool.h:50 (min/max thread pool, droppable queue), src/datasystem/common/parallel/parallel_for.h:34 (work-stealing ParallelFor), src/datasystem/common/eventloop/event_loop.h:41 (epoll reactor, size 64)
+Shared concurrency infrastructure: configurable thread pools, a work-stealing
+parallel-for, and an epoll-based event loop.
+==== Q3.8.7: Security concepts
+[ANSWERED]
+Evidence: src/datasystem/common/encrypt/phrase_pem_tls.h:28 (TLS phrase mgmt), src/datasystem/common/ak_sk/ak_sk_manager.h:50 (AK/SK HMAC-SHA), src/datasystem/common/token/client_access_token.h:42 (token lifecycle w/ jitter), src/datasystem/common/rpc/zmq/zmq_auth.h:78 (ZMQ CURVE), include/datasystem/utils/connection.h:39 (token/accessKey/secretKey fields)
+Security concepts present: TLS cert-phrase management, AK/SK HMAC authentication,
+client access tokens with renewal jitter, and ZMQ CURVE transport auth.
+
+=== Q3.9: Architecture Decisions (arc42 ch.9)
+==== Q3.9.MasterInWorker.Decision
+[ANSWERED]
+Evidence: src/datasystem/worker/worker_oc_server.cpp:676 (master services co-hosted, selected via IsCurrentNodeMaster), src/datasystem/master/replica_manager.cpp:535 (ETCD-CAS election)
+Decision (as-built): the master is not a separate process; every worker can host
+master services and one is elected via ETCD CAS.
+==== Q3.9.MasterInWorker.Rationale
+[OPEN]
+Category: design-rationale
+Ask role: Architect
+Why co-host master in the worker binary and elect via ETCD rather than run a
+dedicated master tier? Trade-offs (operational simplicity vs. blast radius) are not
+in the code. Needed for the ADR "Consequences"/Pugh matrix.
+==== Q3.9.CustomZmqRpc.Decision
+[ANSWERED]
+Evidence: src/datasystem/common/rpc/rpc_server.h:41 (ZmqServerImpl), cmake/dependency.cmake:11 (libzmq) and :17 (grpc both present)
+Decision (as-built): a custom RPC framework over ZeroMQ is the primary service
+transport, even though gRPC is also a dependency.
+==== Q3.9.CustomZmqRpc.Rationale
+[OPEN]
+Category: design-rationale
+Ask role: Architect
+Why build a custom ZMQ RPC instead of using the already-linked gRPC for service
+traffic (latency? shared-memory/UDS integration? payload control)? Rationale and the
+alternatives considered are team knowledge.
+==== Q3.9.EtcdPlusMetastore.Decision
+[ANSWERED]
+Evidence: README_EN.md:74 (ETCD required), src/datasystem/common/kvstore/metastore/metastore_server.h:39 (built-in Metastore)
+Decision (as-built): support both an external ETCD and a built-in Metastore as the
+coordination backend.
+==== Q3.9.EtcdPlusMetastore.Rationale
+[OPEN]
+Category: design-rationale
+Ask role: Architect, Operations
+Which backend is recommended for which deployment, and why maintain both? The code
+shows the mechanism, not the decision criteria or migration intent.
+==== Q3.9.RecordedDecisions: are ADRs tracked anywhere?
+[OPEN]
+Category: design-rationale
+Ask role: Architect
+No ADR directory or "Superseded" markers found in-repo; only
+docs/source_zh_cn/design_document/cluster_management.md exists. Need a pointer to
+where architecture decisions are recorded, if at all.
+
+=== Q3.10: Quality Requirements (arc42 ch.10)
+==== Q3.10.1: Measurable latency/throughput scenarios enforced in code
+[ANSWERED]
+Evidence: src/datasystem/common/util/gflag/common_gflag_define.cpp:91 (payload_nocopy_threshold 100MB), :114 (zmq_chunk_sz 1MB), src/datasystem/worker/worker_oc_server.cpp:177 (oc_worker_aggregate_merge_size 2MB), src/datasystem/common/metrics/metrics.h:81 (latency histogram 1us–60s)
+Code-enforced performance scenarios: zero-copy above 100MB payloads, 1MB ZMQ chunking
+for parallel splits, 2MB worker-worker aggregation merges, and latency histograms
+bucketed 1us–60s.
+==== Q3.10.2: Availability scenarios enforced in code
+[ANSWERED]
+Evidence: src/datasystem/common/util/gflag/common_gflag_define.cpp:105 (node_timeout_s 60), :89 (node_dead_timeout_s 300), src/datasystem/worker/worker_liveness_check.cpp:248 (100%-threadpool+timeout ⇒ K_WORKER_ABNORMAL)
+Availability scenarios: 60s node-timeout / 300s node-dead detection, and a liveness
+check that flags a worker abnormal when its RPC pool is saturated past the probe
+timeout.
+==== Q3.10.3: Target values (SLOs) behind these mechanisms
+[OPEN]
+Category: quality-goals
+Ask role: Architect, Product Owner
+The mechanisms and their default knob values are in code, but the *required* targets
+(RTO/RPO, p99 latency, availability %) they are meant to satisfy are not. Needed to
+judge whether the defaults are adequate.
+
+=== Q3.11: Technical Risks and Technical Debt (arc42 ch.11)
+// Substantive content decomposed under Q5; this arc42 node cross-references it.
+[ANSWERED]
+Evidence: src/datasystem/common/util/version.h:33 (GIT_HASH "NO GIT_HASH FIXME"), src/datasystem/common/util/gflag/common_gflag_define.cpp:57 (urma_connection_size "[DEPRECATED]"), :69 (urma_mode "[DEPRECATED]"), :115 (cache_rpc_session "Deprecated")
+Visible debt markers include unfilled build-time version metadata and several
+deprecated-but-present gflags. Full risk breakdown is under Q5.1–Q5.5.
+
+=== Q3.12: Glossary (arc42 ch.12)
+[ANSWERED]
+Evidence: .repo_context/glossary.md:1, include/datasystem/object/object_enum.h:30 (WriteMode), src/datasystem/worker/hash_ring/hash_ring.h:57 (hash ring), src/datasystem/common/l2cache/l2_storage.h:31 (L2StorageType)
+Core terms (DsClient, worker, master, Metastore, ETCD, hash ring, object/KV/stream
+cache, hetero, WriteMode, slot, L2 storage) are defined by the repo glossary and the
+cited enums/classes.
+
+== Q4: What quality goals drive the design?
+
+=== Q4.1: Functional Suitability
+[ANSWERED]
+Evidence: tests/ut/BUILD.bazel:1, tests/st/BUILD.bazel:1, include/datasystem/kv_client.h:75, include/datasystem/object_client.h:53, include/datasystem/stream_client.h:42
+Functional coverage of the four API families is exercised by unit and system test
+suites; suitability is asserted by those suites rather than a written requirement.
+
+=== Q4.2: Performance Efficiency
+[ANSWERED]
+Evidence: src/datasystem/common/shared_memory/arena.h:71 (zero-copy), src/datasystem/common/util/gflag/common_gflag_define.cpp:91 (payload_nocopy_threshold 100MB), :122 (pipeline_h2d_thread_num 64), src/datasystem/worker/object_cache/worker_oc_spill.cpp (spill_thread_num 8), dsbench/, tests/perf/BUILD.bazel:1
+Performance is a first-class concern: zero-copy shared memory, tunable no-copy
+thresholds, large parallel H2D/spill thread pools, and dedicated benchmark/perf
+suites. (Target numbers: Q4.2 target is [OPEN] under Q3.10.3.)
+
+=== Q4.3: Compatibility
+[ANSWERED]
+Evidence: src/datasystem/pybind_api/pybind_register.cpp:39, src/datasystem/c_api/kv_client_c_wrapper.h:57, src/datasystem/java_api/kv/org_yuanrong_datasystem_kv_KVClient.cpp:37, example/go/kv_client_example.go:1
+Multi-language interoperability (C++/Python/Java/Go over one worker) is a designed
+quality; the same worker serves all bindings.
+
+=== Q4.4: Usability (developer/operator experience)
+[ANSWERED]
+Evidence: README_EN.md:211 (code examples), cli/command.py:1 (dscli), example/python/kv_client_example.py:1, docs/source_zh_cn/quick_start/quick_start.md
+Usability is addressed via a one-command CLI, quick-start docs, and per-language
+examples. (Whether these meet a usability *target* is not stated — see Q1.5.)
+
+=== Q4.5: Reliability
+[ANSWERED]
+Evidence: src/datasystem/master/replica_manager.h:77 (replicated metadata + election), src/datasystem/master/replica_manager.cpp:816 (failover), src/datasystem/worker/object_cache/slot_recovery/slot_recovery_manager.h:92 (disk recovery), include/datasystem/object/object_enum.h:30 (write-through/back durability)
+Reliability mechanisms: replicated/elected metadata, node-timeout failover, slot
+recovery on restart, and selectable write durability.
+
+=== Q4.6: Security
+[ANSWERED]
+Evidence: src/datasystem/common/ak_sk/ak_sk_manager.h:50 (AK/SK HMAC), src/datasystem/common/rpc/zmq/zmq_auth.h:78 (CURVE), src/datasystem/common/encrypt/phrase_pem_tls.h:28 (TLS), src/datasystem/common/util/gflag/common_gflag_define.cpp:44 (encrypt_kit default "plaintext"), :38 (curve_key_dir default "")
+Security mechanisms exist (AK/SK, ZMQ CURVE, TLS phrase mgmt) but are opt-in: the
+default `encrypt_kit` is "plaintext" and CURVE auth is off unless `curve_key_dir` is
+set. (Whether that default is acceptable is Q4.6.target, [OPEN].)
+
+==== Q4.6.target: What is the required security posture?
+[OPEN]
+Category: quality-goals
+Ask role: Architect, Operations
+Mechanisms are visible but the target is not: is plaintext-by-default acceptable
+(trusted-network assumption?), are there compliance frameworks in scope, and what is
+the threat model (internal cluster vs. multi-tenant)? Determines whether the
+plaintext default is debt (Q5.2).
+
+=== Q4.7: Maintainability
+[ANSWERED]
+Evidence: .clang-tidy:1 (static analysis), CMakeLists.txt (-Werror), .repo_context/ (indexed context system), tests/CMakeLists.txt:1 (large test tree)
+Maintainability is supported by enforced static analysis/formatting, warnings-as-errors,
+an extensive test tree, and the checked-in `.repo_context/` knowledge base.
+
+=== Q4.8: Portability
+[ANSWERED]
+Evidence: README_EN.md:97-99 (Linux/x86-64), src/datasystem/common/eventloop/event_loop.h:32 (epoll), CMakeLists.txt:122 (optional NPU/GPU), src/datasystem/common/rdma/fast_transport_manager_wrapper.h:25 (optional URMA/UCX)
+Portability is deliberately narrow at the OS level (Linux/x86-64, epoll, /dev/shm)
+but broad at the accelerator level via compile-time NPU/GPU/URMA/UCX options.
+
+=== Q4.9: Which quality characteristic has priority?
+[OPEN]
+Category: quality-goals
+Ask role: Architect, Product Owner
+The code invests heavily in both performance (zero-copy, big thread pools) and
+reliability (replication, recovery), and CLAUDE.md:3 asserts both are "repository-level
+requirements", but the tie-break ranking (e.g. when availability and latency conflict
+during failover) is not decidable from code. This is the canonical [OPEN] quality
+question and gates the Pugh matrices in Q3.9.
+
+== Q5: What risks and technical debt exist?
+
+=== Q5.1: Technical debt
+==== Q5.1.1: Deprecated-but-present configuration flags
+[ANSWERED]
+Evidence: src/datasystem/common/util/gflag/common_gflag_define.cpp:57 (urma_connection_size [DEPRECATED]), :69 (urma_mode [DEPRECATED]), :92 (enable_multi_stubs "deprecated"), :115 (cache_rpc_session "Deprecated")
+Several gflags are documented deprecated yet still defined, adding configuration
+surface/maintenance burden.
+==== Q5.1.2: Unfilled build-time version metadata
+[ANSWERED]
+Evidence: src/datasystem/common/util/version.h:33 (GIT_HASH "NO GIT_HASH FIXME"), :37 (GIT_BRANCH "NO GIT_BRANCH FIXME")
+Version header ships FIXME placeholders unless the workspace-status build step
+(.bazelrc:2) generates git metadata; source builds can carry no provenance.
+==== Q5.1.3: Which of these is actually tracked as debt?
+[OPEN]
+Category: future-direction
+Ask role: Developer, Architect
+The code has markers but no in-repo issue/debt registry (no TODO backlog file, no ADR
+"Superseded"). Need a pointer to where debt is tracked (issue tracker/wiki) to know
+what is intentional vs. forgotten.
+
+=== Q5.2: Security risks
+[ANSWERED]
+Evidence: src/datasystem/common/util/gflag/common_gflag_define.cpp:44 (encrypt_kit "plaintext" default), :38 (curve_key_dir "" default disables ZMQ auth)
+Insecure-by-default posture: transport encryption and ZMQ CURVE auth are off unless
+explicitly configured, so a misconfigured deployment transmits cache data in plaintext.
+(Whether acceptable depends on Q4.6.target.)
+
+=== Q5.3: Operational risks
+[ANSWERED]
+Evidence: README_EN.md:74 (ETCD mandatory), src/datasystem/common/util/gflag/common_gflag_define.cpp:89 (node_dead_timeout_s 300), src/datasystem/worker/worker_liveness_check.cpp:248 (abnormal on RPC-pool saturation)
+Operational risk surface: a hard external-ETCD dependency (single coordination point
+if under-provisioned) and a 300s node-dead window during which failover has not yet
+completed; RPC thread-pool saturation is a defined failure mode.
+
+==== Q5.3.1: What are the operational runbooks / on-call expectations?
+[OPEN]
+Category: stakeholder-context
+Ask role: Operations
+The repo has observability playbooks (.repo_context/playbooks/operations/), but the
+actual production runbook, alert thresholds, and escalation path are org knowledge,
+not code.
+
+=== Q5.4: Dependency / supply-chain risks
+[ANSWERED]
+Evidence: cmake/dependency.cmake:5-24 (absl/re2/zlib/zmq/rocksdb/protobuf/grpc/etcdapi), Third_Party_Open_Source_Software_Notice:1, WORKSPACE:1
+A broad native dependency stack (each a supply-chain surface) is vendored/fetched via
+CMake/Bazel; the Third_Party notice enumerates OSS components. Pinning/patch strategy
+lives in third_party/patches.
+==== Q5.4.1: Are dependency versions pinned and scanned?
+[OPEN]
+Category: future-direction
+Ask role: Developer, Operations
+Whether third-party versions are pinned to audited releases and CVE-scanned is a
+process question the source layout alone does not answer.
+
+=== Q5.5: Scaling / performance risks
+[ANSWERED]
+Evidence: src/datasystem/master/object_cache/oc_metadata_manager.h:227 (master metadata in-memory concurrent hash maps), src/datasystem/master/object_cache/oc_migrate_metadata_manager.cpp (OBJECT_BATCH 300 migration), src/datasystem/worker/hash_ring/hash_ring_allocator.h:173 (fixed defaultHashTokenNum)
+Scaling risks: master metadata is held in in-memory hash tables (per-master memory
+ceiling), rebalancing migrates objects in fixed 300-object batches, and the ring uses
+a fixed virtual-token count that bounds balance granularity.
+==== Q5.5.1: What is the tested scale ceiling?
+[OPEN]
+Category: quality-goals
+Ask role: Architect, Operations
+The code has scaling mechanisms but not the validated limits (max nodes, max
+objects/keys per master, max metadata memory). Needed to size deployments and flag
+Q5.5 as real vs. theoretical.

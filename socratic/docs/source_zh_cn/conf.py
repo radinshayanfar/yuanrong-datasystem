@@ -1,0 +1,163 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import sys
+import os
+import logging
+from pathlib import Path
+import datetime
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+
+sys.path.append(str(Path("..", "api", "python").resolve()))
+
+ENV_YR_GIT_COMMIT_ID = os.environ.get("YR_DOC_GIT_COMMIT_ID", "")
+ENV_BUILD_VERSION = os.environ.get("BUILD_VERSION", "")
+
+build_time = datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(
+    hours=8
+)
+current_time_str = build_time.strftime("%Y-%m-%d %H:%M:%S")
+
+project = "openYuanrong datasystem"
+copyright = f"{build_time.year}, openEuler openYuanrong datasystem"
+author = "openYuanrong datasystem with CC BY 4.0 LICENSE"
+
+logging.info(
+    f"""Doc build configs:
+ENV_YR_GIT_COMMIT_ID: {ENV_YR_GIT_COMMIT_ID}
+ENV_BUILD_VERSION: {ENV_BUILD_VERSION}
+
+current_date: {current_time_str}
+project: {project}
+copyright: {copyright}
+author: {author}
+"""
+)
+
+templates_path = ["../_templates"]
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+
+    "README.md",
+    "sample_code",
+    "multi_language_function_programming_interface/api/distributed_programming/C++",
+    "multi_language_function_programming_interface/api/distributed_programming/Java",
+    "multi_language_function_programming_interface/api/distributed_programming/Python",
+
+    ""
+]
+
+# -- General configuration ---------------------------------------------------
+# https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
+
+extensions = [
+    "sphinx.ext.autodoc",
+    "sphinx.ext.autosummary",
+    "sphinx.ext.napoleon",
+    "sphinx.ext.viewcode",
+    "sphinx_design",
+    "sphinx_copybutton",
+    "sphinx_togglebutton",
+    "myst_parser",
+    "breathe",
+    "sphinxcontrib.openapi",  # 添加 sphinxcontrib-openapi 扩展
+]
+
+autoclass_content = "both"
+copybutton_exclude = ".linenos, .gp, .go"
+
+
+# -----------------------------------------------------------------------------
+#   FOR PYTHON API GENEREATE
+# -----------------------------------------------------------------------------
+autodoc_mock_imports = ["acl", "requests", "fastapi", "numpy"]
+
+autosummary_generate = True
+autosummary_generate_overwrite = True  # 覆盖已生成的文件
+autosummary_ignore_module_all = False  # 不忽略 __all__ 的限制
+autosummary_imported_members = True
+
+
+# -----------------------------------------------------------------------------
+#   HTML templates
+# -----------------------------------------------------------------------------
+html_logo = "./images/logo-small.png"
+html_favicon = "./images/favicon.png"
+html_theme = "furo"
+
+html_static_path = ["../_static"]
+html_css_files = [
+    "custom.css",
+]
+html_js_files = ["custom.js"]
+
+html_theme_options = {
+    "sidebar_hide_name": False,
+    "source_repository": "https://gitcode.com/openeuler/yuanrong-datasystem",
+    "source_branch": "master",
+    "source_directory": "docs/source_zh_cn/",
+    # Disable per-page edit/view buttons; GitCode link is in sidebar instead
+    "top_of_page_buttons": [],
+    "light_css_variables": {
+        "color-brand-primary": "#3498db",
+        "color-brand-content": "#3498db",
+        "color-api-background": "#f8f9fa",
+        "color-api-name": "#2c3e50",
+        "color-api-pre-name": "#2c3e50",
+    },
+    "dark_css_variables": {
+        "color-brand-primary": "#5dade2",
+        "color-brand-content": "#5dade2",
+        "color-api-background": "#2d3748",
+        "color-api-name": "#e2e8f0",
+        "color-api-pre-name": "#e2e8f0",
+    },
+    # Version switcher is handled by custom brand.html template (hardcoded versions)
+    # Note: Furo does not support versions_url/version_match options
+}
+
+# html_sidebars for Furo theme (uses default)
+
+# -----------------------------------------------------------------------------
+#   Myst extensions
+# -----------------------------------------------------------------------------
+myst_enable_extensions = [
+    "dollarmath",
+    "amsmath",
+    "deflist",
+    "fieldlist",
+    "html_admonition",
+    "html_image",
+    "colon_fence",
+    "smartquotes",
+    "replacements",
+    "strikethrough",
+    "substitution",
+    "tasklist",
+    "attrs_inline",
+    "attrs_block",
+]
+
+myst_heading_anchors = 4
+
+# -----------------------------------------------------------------------------
+#   breathe config
+# -----------------------------------------------------------------------------
+breathe_projects = {"openYuanrong_datasystem": "./../.doxygendocs/xml"}
+breathe_default_project = "openYuanrong_datasystem"
