@@ -1,6 +1,6 @@
 protocol: recover-mental-model-interactive
 instance: ref-main
 head_sha: 3f18c3d609f3e3859009a41b6ec29591ae8435a9
-phase: recover
-joined: false
-phase_label: recover mental model (interactive)
+phase: combine
+joined: true
+phase_label: Combine
