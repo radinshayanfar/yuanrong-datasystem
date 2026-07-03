@@ -1,0 +1,93 @@
+protocol: recover-mental-model-interactive
+instance: ref-main
+state: answering
+head_sha: 3f18c3d609f3e3859009a41b6ec29591ae8435a9
+gates:
+  state: open
+  history: []
+  questions:
+  - id: Q1.2.3
+    text: "Which end-user market segment is the primary customer today \u2014 LLM\
+      \ KVCache, M\u2192N elasticity, RL parameter rearrangement, checkpoint, or microservice\
+      \ state \u2014 and which are aspirational? (Product Owner, Domain Expert)"
+  - id: Q1.4
+    text: "Why was DataSystem built \u2014 was it extracted to accelerate a specific\
+      \ in-house LLM-inference product, to replace an external cache (Redis/Alluxio-like),\
+      \ or as a general openYuanrong platform component? (Product Owner)"
+  - id: Q1.5
+    text: "What success metrics define 'working well' \u2014 what are the target SLOs\
+      \ (e.g. p99 Get latency, throughput, cache hit ratio) that would count as success?\
+      \ (Product Owner)"
+  - id: Q1.6
+    text: Given heterogeneous/NPU paths are optional, is KVCache-for-inference first
+      among equals, or is another scenario the ordering driver for the use-case roadmap?
+      (Product Owner)
+  - id: Q2.2.PUC.KvSetGet.TtlSemantics
+    text: On SetParam.ttlSecond expiry, is the key hard-deleted or merely eligible
+      for eviction? Do reads after expiry fail or miss silently? (Product Owner, Domain
+      Expert)
+  - id: Q3.3.2
+    text: What is the runtime contract/coupling between DataSystem and the other two
+      openYuanrong repos (runtime, function system)? (Product Owner)
+  - id: Q3.2.2.ReviewRules
+    text: "What are the mandated review/branching/release rules \u2014 required approvals,\
+      \ protected branches, release cadence, merge ownership? (Architect, Operations)"
+  - id: Q3.9.MasterInWorker.Rationale
+    text: "Why elect a master among workers via ETCD CAS rather than run a dedicated\
+      \ master tier \u2014 what trade-offs (operational simplicity vs. blast radius)\
+      \ drove this design? (Architect)"
+  - id: Q3.9.CustomZmqRpc.Rationale
+    text: "Why is service traffic on a custom ZeroMQ RPC framework instead of the\
+      \ already-linked gRPC \u2014 was it latency, shared-memory/UDS integration,\
+      \ or payload control, and what alternatives were considered? (Architect)"
+  - id: Q3.9.EtcdPlusMetastore.Rationale
+    text: "Why maintain both ETCD and Metastore coordination backends \u2014 which\
+      \ is recommended for which deployment, and is Metastore meant to eventually\
+      \ replace external ETCD? (Architect, Operations)"
+  - id: Q3.9.RecordedDecisions
+    text: "Where are architecture decisions recorded \u2014 is there an external ADR\
+      \ store, or are decisions only in design docs or people's heads? (Architect)"
+  - id: Q3.10.3
+    text: What target SLOs (RTO/RPO, p99 latency, availability %) are the code knobs
+      (60s/300s timeouts, 100 MB no-copy threshold, etc.) meant to satisfy? (Architect,
+      Product Owner)
+  - id: Q4.6.target
+    text: "What is the required security posture \u2014 is plaintext-by-default acceptable\
+      \ (trusted-network assumption)? Are compliance frameworks in scope? What is\
+      \ the threat model (single-tenant vs. multi-tenant)? (Architect, Operations,\
+      \ Product Owner)"
+  - id: Q4.9
+    text: "When performance and reliability conflict (e.g. latency vs. availability\
+      \ during failover), which ranks first \u2014 and does that ordering change per\
+      \ use-case? (Architect, Product Owner)"
+  - id: Q2.5.2
+    text: "Perf tests exist but assert no numeric bar \u2014 what regression magnitude\
+      \ should fail a build, making performance a verifiable acceptance criterion?\
+      \ (Architect)"
+  - id: Q2.2.PUC.StreamPubSub.Backpressure
+    text: "When a slow consumer fills cacheCapacity, does the producer block, drop,\
+      \ or error \u2014 what is the intended slow-consumer contract? (Architect, Domain\
+      \ Expert)"
+  - id: Q2.6.4
+    text: What is the recommended default WriteMode and ConsistencyType (PRAM vs.
+      Causal) per scenario, and why is PRAM the base case (=0)? (Architect, Domain
+      Expert)
+  - id: Q5.5.1
+    text: "What are the validated scale limits \u2014 max nodes, max objects/keys\
+      \ per master, max metadata memory \u2014 so we know whether scaling risks are\
+      \ real or theoretical? (Architect, Operations)"
+  - id: Q2.3.SUC.WorkerOcService.ErrorContract
+    text: Which Status codes can each worker-OC handler (Create/Publish/Get/DecreaseReference/DeleteAllCopy)
+      return, and which are retryable? (Developer)
+  - id: Q5.1.3
+    text: "Deprecated gflags and FIXME version placeholders exist but there is no\
+      \ in-repo debt registry \u2014 where is technical debt tracked, and which markers\
+      \ are intentional vs. forgotten? (Developer)"
+  - id: Q5.4.1
+    text: Are third-party dependency versions pinned to audited releases and CVE-scanned,
+      and where is that process defined? (Developer, Operations)
+  - id: Q5.3.1
+    text: "What is the actual production runbook, alert thresholds, and escalation\
+      \ path \u2014 the repo has observability playbooks but no on-call runbook? (Operations)"
+  channel: issue
+  issue: '13'
