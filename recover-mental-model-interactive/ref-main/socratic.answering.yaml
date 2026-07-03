@@ -3,8 +3,25 @@ instance: ref-main
 state: answering
 head_sha: 3f18c3d609f3e3859009a41b6ec29591ae8435a9
 gates:
-  state: open
-  history: []
+  state: answered
+  history:
+  - actor: radinshayanfar
+    answers:
+    - Q1.4
+    - Q1.5
+    - Q1.6
+    - Q2.2.PUC.KvGet.HotReplica
+    - Q2.2.PUC.ObjectLifecycle.Postconditions
+    - Q2.5.Targets
+    - Q2.6.TTL
+    - Q3.1
+    - Q3.4
+    - Q3.6.SetGetFlow
+    - Q3.9.SharedMemoryIPC.Context
+    - Q3.9.ZmqCurve.PughMatrix
+    - Q4.6.target
+    - Q4.9
+    - Q5.1.TrackedDebt
   questions:
   - id: Q1.4
     text: "Why was this built \u2014 what motivated building a new near-compute cache\
